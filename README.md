@@ -1,14 +1,18 @@
 # Vela
 
-Local, on-device voice dictation for macOS. Hold a hotkey, speak, release — the text
-appears wherever your cursor is. 100% local: no cloud, no account, no subscription.
+Local, on-device voice dictation for macOS. Press **Fn**, speak, press **Fn** again —
+the text appears wherever your cursor is. 100% local: no cloud, no account, no
+subscription.
 
 Built per `~/Desktop/PRD.md`.
+
+> Set System Settings → Keyboard → "Press 🌐 key to" = **Do Nothing**, so Fn doesn't
+> also open the emoji picker or macOS Dictation.
 
 ## Pipeline
 
 ```
-Hold ⌥Space → mic capture (AVAudioEngine, 16 kHz)
+Fn (toggle) → mic capture (AVAudioEngine, 16 kHz)
   → WhisperKit STT (large-v3 turbo compressed, on-device, ANE)
     → [optional] Ollama cleanup (qwen2.5:3b, keep_alive: 0)
       → paste into focused app (clipboard + synthetic ⌘V)
@@ -24,13 +28,13 @@ open build/Vela.app
 
 ## First run
 
-1. A waveform icon appears in the menu bar.
-2. **Hold ⌥Space and speak.** First ever dictation downloads the Whisper model
+1. A waveform icon appears in the menu bar. macOS prompts for **Accessibility** at
+   launch (needed for the Fn key and for pasting) — grant it, then relaunch Vela once
+   if the hotkey doesn't respond.
+2. **Press Fn and speak.** First ever dictation downloads the Whisper model
    (~0.6 GB from Hugging Face) — expect a wait; later runs load from disk in seconds.
-3. macOS will prompt for **Microphone** (first recording) and **Accessibility**
-   (first insertion). Grant both. If the paste doesn't land right after granting
-   Accessibility, quit and relaunch Vela once.
-4. Release the key — text is pasted into whatever app is focused.
+   macOS prompts for **Microphone** on the first recording.
+3. **Press Fn again** — text is pasted into whatever app is focused.
 
 ## AI cleanup (optional, off by default)
 
@@ -47,7 +51,7 @@ leaves RAM immediately after each cleanup.
 
 ## Settings
 
-- **Push-to-talk hotkey** (default ⌥Space, hold to record)
+- **Trigger** — Fn key press-to-toggle (default), or a custom shortcut (also toggle)
 - **Whisper model** — large-v3 turbo compressed (default) down to base.en (lightest)
 - **Idle unload** — Whisper is dropped from RAM after 2 min idle (configurable)
 - **Vocabulary tab** — one term per line; biases Whisper and instructs the cleanup LLM
