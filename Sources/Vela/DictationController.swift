@@ -49,6 +49,10 @@ final class DictationController: ObservableObject {
     private let fnMonitor = FnKeyMonitor()
     private let log = Logger(subsystem: "com.vela.app", category: "pipeline")
 
+    /// F7b: recording hard-stops after this long and proceeds to transcription.
+    private static let maxRecordingDuration: TimeInterval = 600
+    private var maxDurationTask: Task<Void, Never>?
+
     private var triggerName: String {
         AppSettings.triggerMode == .fnKey ? "Fn" : "the shortcut"
     }
@@ -57,7 +61,7 @@ final class DictationController: ObservableObject {
         if let lastError { return "⚠️ \(lastError)" }
         switch state {
         case .idle: return "Vela — press \(triggerName) to dictate"
-        case .recording: return "Recording… (press \(triggerName) again to insert)"
+        case .recording: return "Recording… (\(triggerName) to insert · Esc to cancel)"
         case .transcribing:
             if let progressPhase {
                 if let progressFraction {
@@ -91,6 +95,10 @@ final class DictationController: ObservableObject {
         fnMonitor.onToggle = { [weak self] in
             guard AppSettings.triggerMode == .fnKey else { return }
             self?.toggleDictation()
+        }
+        // Esc cancels an in-progress recording regardless of trigger mode (F6).
+        fnMonitor.onEscape = { [weak self] in
+            self?.cancelRecording()
         }
         fnMonitor.start()
 
@@ -134,14 +142,38 @@ final class DictationController: ObservableObject {
             do {
                 try self.recorder.start()
                 self.state = .recording
+                self.scheduleMaxDurationStop()
             } catch {
                 self.lastError = error.localizedDescription
             }
         }
     }
 
+    /// F6: Esc while recording — stop capture, discard audio, insert nothing.
+    func cancelRecording() {
+        guard state == .recording else { return }
+        maxDurationTask?.cancel()
+        maxDurationTask = nil
+        _ = recorder.stop()
+        state = .idle
+        log.info("Recording cancelled via Esc — audio discarded")
+    }
+
+    /// F7b: hard-stop after 10 minutes and proceed to transcription.
+    private func scheduleMaxDurationStop() {
+        maxDurationTask?.cancel()
+        maxDurationTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.maxRecordingDuration))
+            guard !Task.isCancelled, let self, self.state == .recording else { return }
+            self.log.info("Max recording duration reached (\(Self.maxRecordingDuration, privacy: .public)s) — auto-stopping")
+            self.stopAndProcess()
+        }
+    }
+
     func stopAndProcess() {
         guard state == .recording else { return }
+        maxDurationTask?.cancel()
+        maxDurationTask = nil
         let released = Date()
         let samples = recorder.stop()
         state = .transcribing
@@ -149,6 +181,15 @@ final class DictationController: ObservableObject {
         // Ignore accidental taps shorter than ~0.3 s of audio.
         guard Double(samples.count) / AudioRecorder.targetSampleRate > 0.3 else {
             state = .idle
+            return
+        }
+
+        // F7a silence guard: never hand silence/noise to Whisper — it hallucinates
+        // text, and that text would be pasted into the focused app.
+        guard AudioRecorder.containsSpeech(samples) else {
+            state = .idle
+            lastError = "No speech detected — nothing inserted"
+            log.info("Silence guard tripped: \(samples.count) samples discarded without transcription")
             return
         }
 

@@ -14,8 +14,12 @@ final class FnKeyMonitor {
     private let log = Logger(subsystem: "com.vela.app", category: "hotkey")
 
     private static let fnKeyCode: UInt16 = 63 // kVK_Function
+    private static let escKeyCode: UInt16 = 53 // kVK_Escape
 
     var onToggle: (() -> Void)?
+    /// Fired on any Esc key-down (global monitors can't consume the event, so the
+    /// focused app still receives the Esc — acceptable for a cancel gesture).
+    var onEscape: (() -> Void)?
 
     func start() {
         stop()
@@ -50,6 +54,7 @@ final class FnKeyMonitor {
             }
         case .keyDown:
             if fnDown { sawOtherKey = true }
+            if event.keyCode == Self.escKeyCode { onEscape?() }
         default:
             break
         }

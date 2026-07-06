@@ -63,6 +63,35 @@ final class AudioRecorder {
         return samples
     }
 
+    /// Silence guard (F7a): true if the samples contain speech-like energy. Whisper
+    /// hallucinates text on silent/noise-only audio, so the pipeline discards anything
+    /// that fails this check instead of injecting phantom text.
+    ///
+    /// Energy VAD: frames count as voiced when their RMS clears a threshold set above
+    /// the recording's own noise floor, and we require ≥0.25 s of voiced audio total.
+    static func containsSpeech(_ samples: [Float]) -> Bool {
+        let frameSize = Int(targetSampleRate * 0.03) // 30 ms frames
+        guard samples.count >= frameSize else { return false }
+
+        var frameRMS: [Float] = []
+        frameRMS.reserveCapacity(samples.count / frameSize)
+        var index = 0
+        while index + frameSize <= samples.count {
+            var sum: Float = 0
+            for sample in samples[index..<(index + frameSize)] { sum += sample * sample }
+            frameRMS.append(sqrt(sum / Float(frameSize)))
+            index += frameSize
+        }
+
+        // Noise floor = 20th percentile; threshold scales with it so a fan or hum
+        // doesn't count as speech, with an absolute floor for very quiet rooms.
+        let sorted = frameRMS.sorted()
+        let noiseFloor = sorted[sorted.count / 5]
+        let threshold = max(0.012, noiseFloor * 3)
+        let voicedSeconds = Double(frameRMS.filter { $0 > threshold }.count) * 0.03
+        return voicedSeconds >= 0.25
+    }
+
     private func append(_ buffer: AVAudioPCMBuffer) {
         guard let converter else { return }
         let ratio = AudioRecorder.targetSampleRate / buffer.format.sampleRate
