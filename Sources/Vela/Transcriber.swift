@@ -54,11 +54,16 @@ actor Transcriber {
         }
         whisperKit = nil // release any old model before loading a new one
 
-        // Explicit download step so we can surface progress. Already-downloaded files
-        // are skipped (size check), so this returns near-instantly on later runs.
-        onProgress("Downloading model", 0)
-        let folder = try await WhisperKit.download(variant: wanted) { progress in
-            onProgress("Downloading model", progress.fractionCompleted)
+        // Use the on-disk copy when present — no network involved (G1: works offline).
+        // Only hit Hugging Face when the model has never been downloaded.
+        let folder: URL
+        if let local = Self.locateLocalModel(wanted) {
+            folder = local
+        } else {
+            onProgress("Downloading model", 0)
+            folder = try await WhisperKit.download(variant: wanted) { progress in
+                onProgress("Downloading model", progress.fractionCompleted)
+            }
         }
 
         onProgress("Loading model", nil)
@@ -70,6 +75,23 @@ actor Transcriber {
         whisperKit = pipe
         loadedModelName = wanted
         return pipe
+    }
+
+    /// Finds a previously downloaded model folder on disk. Folder names carry a
+    /// repo prefix (e.g. "openai_whisper-large-v3-…", "distil-whisper_distil-large-v3"),
+    /// so match by suffix and require a complete download (decoder present).
+    private static func locateLocalModel(_ variant: String) -> URL? {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let base = documents.appendingPathComponent("huggingface/models/argmaxinc/whisperkit-coreml")
+        guard let entries = try? FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        return entries.first {
+            $0.lastPathComponent.hasSuffix(variant)
+                && FileManager.default.fileExists(atPath: $0.appendingPathComponent("TextDecoder.mlmodelc").path)
+        }
     }
 
     /// G3: drop the model from RAM after the configured idle period.
