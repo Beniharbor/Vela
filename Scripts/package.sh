@@ -27,8 +27,15 @@ for bundle in .build/"$CONFIG"/*.bundle; do
   [ -e "$bundle" ] && cp -R "$bundle" "$APP/Contents/Resources/"
 done
 
-echo "==> Ad-hoc codesign"
-codesign --force --deep --sign - "$APP"
+# Stable identity keeps TCC permission grants across rebuilds (ad-hoc signatures
+# change every build, making macOS re-prompt for Mic/Accessibility each time).
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Vela Dev"; then
+  echo "==> Codesign with Vela Dev identity"
+  codesign --force --deep --sign "Vela Dev" "$APP"
+else
+  echo "==> Ad-hoc codesign (Vela Dev identity not found — permissions will re-prompt after rebuilds)"
+  codesign --force --deep --sign - "$APP"
+fi
 
 echo "==> Done: $ROOT/$APP"
 
