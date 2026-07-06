@@ -9,11 +9,14 @@ actor Transcriber {
     private var unloadTask: Task<Void, Never>?
     private let log = Logger(subsystem: "com.vela.app", category: "stt")
 
+    /// Progress callback: (phase label, fraction 0–1 or nil for indeterminate).
+    typealias ProgressHandler = @Sendable (String, Double?) -> Void
+
     /// Transcribes 16 kHz mono samples. Loads the model on first use (downloads it on
     /// the very first run — can take a while; subsequent loads come from disk).
-    func transcribe(samples: [Float], glossaryTerms: [String]) async throws -> String {
+    func transcribe(samples: [Float], glossaryTerms: [String], onProgress: @escaping ProgressHandler) async throws -> String {
         unloadTask?.cancel()
-        let pipe = try await loadIfNeeded()
+        let pipe = try await loadIfNeeded(onProgress: onProgress)
 
         var options = DecodingOptions()
         options.language = "en"
@@ -27,6 +30,16 @@ actor Transcriber {
             options.usePrefillPrompt = true
         }
 
+        // WhisperKit tracks overall decode progress across audio windows — poll it
+        // so the menu bar can show a live percentage.
+        let poller = Task {
+            while !Task.isCancelled {
+                onProgress("Transcribing", pipe.progress.fractionCompleted)
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+        defer { poller.cancel() }
+
         let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
         scheduleUnload()
         let text = results.map(\.text).joined(separator: " ")
@@ -34,15 +47,24 @@ actor Transcriber {
         return Self.stripTags(text)
     }
 
-    private func loadIfNeeded() async throws -> WhisperKit {
+    private func loadIfNeeded(onProgress: @escaping ProgressHandler) async throws -> WhisperKit {
         let wanted = AppSettings.whisperModel
         if let whisperKit, loadedModelName == wanted {
             return whisperKit
         }
         whisperKit = nil // release any old model before loading a new one
+
+        // Explicit download step so we can surface progress. Already-downloaded files
+        // are skipped (size check), so this returns near-instantly on later runs.
+        onProgress("Downloading model", 0)
+        let folder = try await WhisperKit.download(variant: wanted) { progress in
+            onProgress("Downloading model", progress.fractionCompleted)
+        }
+
+        onProgress("Loading model", nil)
         log.info("Loading Whisper model \(wanted, privacy: .public)")
         let start = Date()
-        let config = WhisperKitConfig(model: wanted)
+        let config = WhisperKitConfig(model: wanted, modelFolder: folder.path)
         let pipe = try await WhisperKit(config)
         log.info("Model loaded in \(Date().timeIntervalSince(start), format: .fixed(precision: 2))s")
         whisperKit = pipe

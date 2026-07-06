@@ -10,7 +10,12 @@ struct VelaApp: App {
         MenuBarExtra {
             MenuContent(controller: controller)
         } label: {
-            Image(systemName: controller.state.symbolName)
+            if let percent = controller.menuBarPercent {
+                // Live progress in the menu bar while downloading/transcribing.
+                Text(percent)
+            } else {
+                Image(systemName: controller.state.symbolName)
+            }
         }
 
         Settings {
@@ -35,6 +40,12 @@ struct MenuContent: View {
         Text(controller.statusLine)
         if let latency = controller.lastLatencyDescription {
             Text(latency)
+        }
+        if let transcript = controller.lastTranscript {
+            Button("Copy last transcript") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(transcript, forType: .string)
+            }
         }
         Divider()
         SettingsLink {

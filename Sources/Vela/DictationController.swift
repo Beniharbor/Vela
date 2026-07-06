@@ -27,6 +27,9 @@ final class DictationController: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var lastLatency: TimeInterval?
     @Published private(set) var lastTranscript: String?
+    /// e.g. "Downloading model" + 0.42 while working; nil when idle.
+    @Published private(set) var progressPhase: String?
+    @Published private(set) var progressFraction: Double?
 
     private let recorder = AudioRecorder()
     private let transcriber = Transcriber()
@@ -42,9 +45,22 @@ final class DictationController: ObservableObject {
         switch state {
         case .idle: return "Vela — press \(triggerName) to dictate"
         case .recording: return "Recording… (press \(triggerName) again to insert)"
-        case .transcribing: return "Transcribing…"
+        case .transcribing:
+            if let progressPhase {
+                if let progressFraction {
+                    return "\(progressPhase)… \(Int(progressFraction * 100))%"
+                }
+                return "\(progressPhase)…"
+            }
+            return "Transcribing…"
         case .cleaning: return "Cleaning up…"
         }
+    }
+
+    /// Short percent string for the menu bar label while working (nil hides it).
+    var menuBarPercent: String? {
+        guard state == .transcribing, let progressFraction, progressFraction > 0 else { return nil }
+        return "\(Int(progressFraction * 100))%"
     }
 
     var lastLatencyDescription: String? {
@@ -117,7 +133,14 @@ final class DictationController: ObservableObject {
             do {
                 let glossary = AppSettings.glossaryTerms
                 let sttStart = Date()
-                let raw = try await self.transcriber.transcribe(samples: samples, glossaryTerms: glossary)
+                let raw = try await self.transcriber.transcribe(samples: samples, glossaryTerms: glossary) { phase, fraction in
+                    Task { @MainActor in
+                        self.progressPhase = phase
+                        self.progressFraction = fraction
+                    }
+                }
+                self.progressPhase = nil
+                self.progressFraction = nil
                 self.log.info("STT took \(Date().timeIntervalSince(sttStart), format: .fixed(precision: 2))s: \(raw, privacy: .public)")
 
                 guard !raw.isEmpty else {
@@ -144,6 +167,8 @@ final class DictationController: ObservableObject {
             } catch {
                 self.lastError = error.localizedDescription
                 self.log.error("Pipeline failed: \(error.localizedDescription, privacy: .public)")
+                self.progressPhase = nil
+                self.progressFraction = nil
                 self.state = .idle
             }
         }
