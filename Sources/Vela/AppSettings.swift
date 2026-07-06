@@ -2,14 +2,22 @@ import Foundation
 import KeyboardShortcuts
 
 extension KeyboardShortcuts.Name {
-    /// Push-to-talk: hold to record, release to transcribe.
+    /// Custom toggle shortcut (used when trigger mode is .customShortcut).
     /// Default ⌥Space — changeable in Settings.
     static let pushToTalk = Self("pushToTalk", default: .init(.space, modifiers: [.option]))
+}
+
+/// How dictation is triggered. Both modes are press-to-toggle:
+/// press once to start recording, press again to stop and insert.
+enum TriggerMode: String {
+    case fnKey       // bare Fn key (default)
+    case customShortcut
 }
 
 /// UserDefaults-backed settings. All keys are also readable via @AppStorage in SwiftUI.
 enum AppSettings {
     enum Keys {
+        static let triggerMode = "triggerMode"
         static let cleanupEnabled = "cleanupEnabled"
         static let ollamaModel = "ollamaModel"
         static let whisperModel = "whisperModel"
@@ -21,6 +29,7 @@ enum AppSettings {
 
     static func registerDefaults() {
         defaults.register(defaults: [
+            Keys.triggerMode: TriggerMode.fnKey.rawValue,
             // G3: ship with cleanup OFF (lightest). Whisper already punctuates.
             Keys.cleanupEnabled: false,
             Keys.ollamaModel: "qwen2.5:3b",
@@ -32,6 +41,9 @@ enum AppSettings {
         ])
     }
 
+    static var triggerMode: TriggerMode {
+        TriggerMode(rawValue: defaults.string(forKey: Keys.triggerMode) ?? "") ?? .fnKey
+    }
     static var cleanupEnabled: Bool { defaults.bool(forKey: Keys.cleanupEnabled) }
     static var ollamaModel: String { defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b" }
     static var whisperModel: String { defaults.string(forKey: Keys.whisperModel) ?? "large-v3-v20240930_626MB" }

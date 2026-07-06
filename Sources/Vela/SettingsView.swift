@@ -14,6 +14,7 @@ struct SettingsView: View {
 }
 
 private struct GeneralSettings: View {
+    @AppStorage(AppSettings.Keys.triggerMode) private var triggerMode = TriggerMode.fnKey.rawValue
     @AppStorage(AppSettings.Keys.cleanupEnabled) private var cleanupEnabled = false
     @AppStorage(AppSettings.Keys.ollamaModel) private var ollamaModel = "qwen2.5:3b"
     @AppStorage(AppSettings.Keys.whisperModel) private var whisperModel = "large-v3-v20240930_626MB"
@@ -22,7 +23,18 @@ private struct GeneralSettings: View {
     var body: some View {
         Form {
             Section("Dictation") {
-                KeyboardShortcuts.Recorder("Push-to-talk (hold):", name: .pushToTalk)
+                Picker("Trigger:", selection: $triggerMode) {
+                    Text("Fn key — press to start, press again to insert")
+                        .tag(TriggerMode.fnKey.rawValue)
+                    Text("Custom shortcut (toggle)").tag(TriggerMode.customShortcut.rawValue)
+                }
+                if triggerMode == TriggerMode.customShortcut.rawValue {
+                    KeyboardShortcuts.Recorder("Shortcut:", name: .pushToTalk)
+                } else {
+                    Text("Tip: set System Settings → Keyboard → “Press 🌐 key to” to **Do Nothing**, so Fn doesn't also open the emoji picker or macOS Dictation.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
                 Picker("Whisper model:", selection: $whisperModel) {
                     Text("large-v3 turbo, compressed ~0.6 GB (recommended)")
                         .tag("large-v3-v20240930_626MB")

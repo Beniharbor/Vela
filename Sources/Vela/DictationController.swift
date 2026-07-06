@@ -30,13 +30,18 @@ final class DictationController: ObservableObject {
 
     private let recorder = AudioRecorder()
     private let transcriber = Transcriber()
+    private let fnMonitor = FnKeyMonitor()
     private let log = Logger(subsystem: "com.vela.app", category: "pipeline")
+
+    private var triggerName: String {
+        AppSettings.triggerMode == .fnKey ? "Fn" : "the shortcut"
+    }
 
     var statusLine: String {
         if let lastError { return "⚠️ \(lastError)" }
         switch state {
-        case .idle: return "Vela — hold hotkey to dictate"
-        case .recording: return "Recording… (release to insert)"
+        case .idle: return "Vela — press \(triggerName) to dictate"
+        case .recording: return "Recording… (press \(triggerName) again to insert)"
         case .transcribing: return "Transcribing…"
         case .cleaning: return "Cleaning up…"
         }
@@ -48,13 +53,33 @@ final class DictationController: ObservableObject {
     }
 
     func registerHotkey() {
+        // Both triggers are press-to-toggle; the active one is checked at press time
+        // so switching modes in Settings takes effect immediately.
+        fnMonitor.onToggle = { [weak self] in
+            guard AppSettings.triggerMode == .fnKey else { return }
+            self?.toggleDictation()
+        }
+        fnMonitor.start()
+
         KeyboardShortcuts.onKeyDown(for: .pushToTalk) { [weak self] in
-            self?.startRecording()
+            guard AppSettings.triggerMode == .customShortcut else { return }
+            self?.toggleDictation()
         }
-        KeyboardShortcuts.onKeyUp(for: .pushToTalk) { [weak self] in
-            self?.stopAndProcess()
+
+        // The Fn monitor only receives events once Accessibility is granted —
+        // surface the prompt at launch so the hotkey works out of the box.
+        if AppSettings.triggerMode == .fnKey {
+            TextInjector.ensureAccessibility(prompt: true)
         }
-        log.info("Push-to-talk hotkey registered")
+        log.info("Dictation triggers registered (mode: \(AppSettings.triggerMode.rawValue, privacy: .public))")
+    }
+
+    func toggleDictation() {
+        switch state {
+        case .idle: startRecording()
+        case .recording: stopAndProcess()
+        case .transcribing, .cleaning: break // pipeline already running; ignore
+        }
     }
 
     func startRecording() {

@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Menu-bar agent app: no dock icon (also set via LSUIElement in Info.plist).
         NSApp.setActivationPolicy(.accessory)
+        AppSettings.registerDefaults()
         DictationController.shared.registerHotkey()
     }
 }
