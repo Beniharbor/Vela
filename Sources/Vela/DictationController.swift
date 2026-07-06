@@ -23,8 +23,21 @@ final class DictationController: ObservableObject {
         }
     }
 
-    @Published private(set) var state: State = .idle
+    @Published private(set) var state: State = .idle {
+        didSet {
+            if state == .recording {
+                micLevels = Array(repeating: 0, count: Self.levelBarCount)
+                hud.show()
+            } else if oldValue == .recording {
+                hud.hide()
+            }
+        }
+    }
     @Published private(set) var lastError: String?
+    /// Rolling mic-level history for the recording HUD (newest at the end).
+    @Published private(set) var micLevels: [Float] = Array(repeating: 0, count: DictationController.levelBarCount)
+    private static let levelBarCount = 24
+    private let hud = RecordingHUD()
     @Published private(set) var lastLatency: TimeInterval?
     @Published private(set) var lastTranscript: String?
     /// e.g. "Downloading model" + 0.42 while working; nil when idle.
@@ -69,6 +82,10 @@ final class DictationController: ObservableObject {
     }
 
     func registerHotkey() {
+        recorder.onLevel = { [weak self] level in
+            Task { @MainActor in self?.pushLevel(level) }
+        }
+
         // Both triggers are press-to-toggle; the active one is checked at press time
         // so switching modes in Settings takes effect immediately.
         fnMonitor.onToggle = { [weak self] in
@@ -88,6 +105,12 @@ final class DictationController: ObservableObject {
             TextInjector.ensureAccessibility(prompt: true)
         }
         log.info("Dictation triggers registered (mode: \(AppSettings.triggerMode.rawValue, privacy: .public))")
+    }
+
+    private func pushLevel(_ level: Float) {
+        guard state == .recording else { return }
+        micLevels.removeFirst()
+        micLevels.append(level)
     }
 
     func toggleDictation() {

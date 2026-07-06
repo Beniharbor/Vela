@@ -9,6 +9,9 @@ final class AudioRecorder {
     private let lock = NSLock()
     private let log = Logger(subsystem: "com.vela.app", category: "audio")
 
+    /// Called on the audio thread with a normalized 0–1 mic level per buffer (~10/s).
+    var onLevel: (@Sendable (Float) -> Void)?
+
     static let targetSampleRate: Double = 16_000
 
     private let targetFormat = AVAudioFormat(
@@ -86,6 +89,11 @@ final class AudioRecorder {
         lock.lock()
         samples.append(contentsOf: chunk)
         lock.unlock()
+
+        if let onLevel {
+            let rms = sqrt(chunk.reduce(0) { $0 + $1 * $1 } / Float(chunk.count))
+            onLevel(min(1, rms * 12)) // speech RMS is small; scale into a visible 0–1 range
+        }
     }
 }
 
