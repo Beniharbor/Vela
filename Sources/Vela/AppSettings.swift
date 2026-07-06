@@ -18,7 +18,7 @@ enum TriggerMode: String {
 enum AppSettings {
     enum Keys {
         static let triggerMode = "triggerMode"
-        static let cleanupEnabled = "cleanupEnabled"
+        static let dictationStyle = "dictationStyle"
         static let ollamaModel = "ollamaModel"
         static let whisperModel = "whisperModel"
         static let glossary = "glossary"
@@ -30,8 +30,8 @@ enum AppSettings {
     static func registerDefaults() {
         defaults.register(defaults: [
             Keys.triggerMode: TriggerMode.fnKey.rawValue,
-            // G3: ship with cleanup OFF (lightest). Whisper already punctuates.
-            Keys.cleanupEnabled: false,
+            // G3: ship in Flow (no LLM — lightest). Whisper already punctuates.
+            Keys.dictationStyle: DictationStyle.flow.rawValue,
             Keys.ollamaModel: "qwen2.5:3b",
             // Argmax-compressed large-v3 turbo (~0.6 GB). See PRD §7.
             Keys.whisperModel: "large-v3-v20240930_626MB",
@@ -44,7 +44,9 @@ enum AppSettings {
     static var triggerMode: TriggerMode {
         TriggerMode(rawValue: defaults.string(forKey: Keys.triggerMode) ?? "") ?? .fnKey
     }
-    static var cleanupEnabled: Bool { defaults.bool(forKey: Keys.cleanupEnabled) }
+    static var dictationStyle: DictationStyle {
+        DictationStyle(rawValue: defaults.string(forKey: Keys.dictationStyle) ?? "") ?? .flow
+    }
     static var ollamaModel: String { defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b" }
     static var whisperModel: String { defaults.string(forKey: Keys.whisperModel) ?? "large-v3-v20240930_626MB" }
     static var modelIdleUnloadSeconds: Double { defaults.double(forKey: Keys.modelIdleUnloadSeconds) }

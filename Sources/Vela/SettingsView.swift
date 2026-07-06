@@ -16,7 +16,7 @@ struct SettingsView: View {
 
 private struct GeneralSettings: View {
     @AppStorage(AppSettings.Keys.triggerMode) private var triggerMode = TriggerMode.fnKey.rawValue
-    @AppStorage(AppSettings.Keys.cleanupEnabled) private var cleanupEnabled = false
+    @AppStorage(AppSettings.Keys.dictationStyle) private var styleRaw = DictationStyle.flow.rawValue
     @AppStorage(AppSettings.Keys.ollamaModel) private var ollamaModel = "qwen2.5:3b"
     @AppStorage(AppSettings.Keys.whisperModel) private var whisperModel = "large-v3-v20240930_626MB"
     @AppStorage(AppSettings.Keys.modelIdleUnloadSeconds) private var idleUnload = 120.0
@@ -50,10 +50,18 @@ private struct GeneralSettings: View {
                 }
             }
 
-            Section("AI cleanup (optional)") {
-                Toggle("Clean up transcripts with a local LLM", isOn: $cleanupEnabled)
-                if cleanupEnabled {
-                    Picker("Cleanup model:", selection: $ollamaModel) {
+            Section("Style") {
+                Picker("Style:", selection: $styleRaw) {
+                    ForEach(DictationStyle.allCases) { style in
+                        Text("\(style.displayName) — \(style.menuDescription)")
+                            .tag(style.rawValue)
+                    }
+                }
+                Text("Flow inserts your words verbatim with no LLM (lightest). Structured and Clean rewrite with a local LLM. You can also switch styles from the dropdown in the recording pill.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                if let style = DictationStyle(rawValue: styleRaw), style.usesLLM {
+                    Picker("LLM model:", selection: $ollamaModel) {
                         Text("qwen2.5:3b (balanced)").tag("qwen2.5:3b")
                         Text("gemma2:2b (lighter)").tag("gemma2:2b")
                     }

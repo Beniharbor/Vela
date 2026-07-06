@@ -35,9 +35,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct MenuContent: View {
     @ObservedObject var controller: DictationController
+    @AppStorage(AppSettings.Keys.dictationStyle) private var styleRaw = DictationStyle.flow.rawValue
 
     var body: some View {
         Text(controller.statusLine)
+        Picker("Style", selection: $styleRaw) {
+            ForEach(DictationStyle.allCases) { style in
+                Text("\(style.displayName) — \(style.menuDescription)")
+                    .tag(style.rawValue)
+            }
+        }
         if let latency = controller.lastLatencyDescription {
             Text(latency)
         }

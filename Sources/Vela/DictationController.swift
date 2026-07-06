@@ -70,7 +70,7 @@ final class DictationController: ObservableObject {
                 return "\(progressPhase)…"
             }
             return "Transcribing…"
-        case .cleaning: return "Cleaning up…"
+        case .cleaning: return "Formatting (\(AppSettings.dictationStyle.displayName))…"
         }
     }
 
@@ -213,13 +213,14 @@ final class DictationController: ObservableObject {
                 }
 
                 var final = raw
-                if AppSettings.cleanupEnabled {
+                let style = AppSettings.dictationStyle
+                if style.usesLLM {
                     self.state = .cleaning
                     do {
-                        final = try await OllamaCleanup.clean(raw, glossaryTerms: glossary)
+                        final = try await OllamaCleanup.clean(raw, style: style, glossaryTerms: glossary)
                     } catch {
-                        // Cleanup is best-effort: fall back to the raw transcript.
-                        self.log.error("Cleanup failed, using raw transcript: \(error.localizedDescription, privacy: .public)")
+                        // Styling is best-effort: fall back to the raw transcript.
+                        self.log.error("\(style.displayName, privacy: .public) styling failed, using raw transcript: \(error.localizedDescription, privacy: .public)")
                     }
                 }
 

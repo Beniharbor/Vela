@@ -1,7 +1,8 @@
 import Foundation
 import os
 
-/// F2: optional transcript cleanup via a local Ollama server.
+/// F2: optional transcript cleanup/formatting via a local Ollama server, with the
+/// prompt chosen by the active DictationStyle (Structured/Clean — Flow never calls this).
 /// On-demand lifecycle: starts `ollama serve` only when needed; `keep_alive: 0`
 /// unloads the LLM from RAM immediately after each request (G3).
 struct OllamaCleanup {
@@ -23,19 +24,11 @@ struct OllamaCleanup {
         ollamaPaths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    /// Cleans the transcript with the 3-job prompt. Throws if Ollama is unavailable —
-    /// callers should fall back to the raw transcript.
-    static func clean(_ transcript: String, glossaryTerms: [String]) async throws -> String {
+    /// Rewrites the transcript per the selected style's prompt. Throws if Ollama is
+    /// unavailable — callers should fall back to the raw transcript.
+    static func clean(_ transcript: String, style: DictationStyle, glossaryTerms: [String]) async throws -> String {
+        guard var system = style.systemPrompt else { return transcript }
         try await ensureServerRunning()
-
-        var system = """
-        You clean up raw voice-dictation transcripts. Do exactly three things:
-        1. Restore punctuation and capitalization.
-        2. Remove filler words (um, uh, you know, like when used as filler).
-        3. Fix obvious speech-recognition errors of technical terms.
-        Do NOT rephrase, summarize, translate, answer questions, or add anything.
-        Output ONLY the cleaned text, nothing else.
-        """
         if !glossaryTerms.isEmpty {
             system += "\nUser glossary (canonical spellings — map near-misses to these): "
                 + glossaryTerms.joined(separator: ", ")
