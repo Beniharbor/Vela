@@ -5,7 +5,9 @@ let package = Package(
     name: "Vela",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", from: "2.0.0"),
+        // Vendored (v2.4.0) with #Preview blocks stripped — the Xcode-only PreviewsMacros
+        // plugin is missing from Command Line Tools and breaks `swift build`.
+        .package(path: "Vendor/KeyboardShortcuts"),
         .package(url: "https://github.com/argmaxinc/WhisperKit", from: "0.9.0"),
     ],
     targets: [
