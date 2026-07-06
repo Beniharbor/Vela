@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 import KeyboardShortcuts
 
 struct SettingsView: View {
@@ -68,16 +69,60 @@ private struct GeneralSettings: View {
                 }
             }
 
-            Section("Permissions") {
-                Button("Check Accessibility permission…") {
-                    TextInjector.ensureAccessibility(prompt: true)
-                }
-                Text("Vela needs Microphone (to hear you) and Accessibility (to paste into other apps). Models run 100% on-device.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+            PermissionsSection()
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct PermissionsSection: View {
+    @State private var axGranted = false
+    @State private var micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Section("Permissions") {
+            LabeledContent("Microphone (to hear you)") {
+                statusBadge(micGranted: micStatus)
+            }
+            LabeledContent("Accessibility (to insert text & catch Fn)") {
+                badge(granted: axGranted)
+            }
+            Button("Open Privacy & Security settings…") {
+                let pane = axGranted && micStatus != .authorized
+                    ? "Privacy_Microphone" : "Privacy_Accessibility"
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            Text("Everything runs 100% on-device. If a permission shows as missing after you granted it there, relaunch Vela once.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .onAppear { update() }
+        .onReceive(refresh) { _ in update() }
+    }
+
+    private func update() {
+        axGranted = TextInjector.ensureAccessibility(prompt: false)
+        micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+
+    @ViewBuilder
+    private func statusBadge(micGranted status: AVAuthorizationStatus) -> some View {
+        if status == .notDetermined {
+            // macOS simply hasn't asked yet — the first recording will.
+            Label("Will ask on first use", systemImage: "questionmark.circle")
+                .foregroundStyle(.secondary)
+        } else {
+            badge(granted: status == .authorized)
+        }
+    }
+
+    private func badge(granted: Bool) -> Label<Text, Image> {
+        granted
+            ? Label("Granted", systemImage: "checkmark.circle.fill")
+            : Label("Not granted", systemImage: "xmark.circle.fill")
     }
 }
 
