@@ -63,15 +63,33 @@ final class AudioRecorder {
         return samples
     }
 
-    /// Silence guard (F7a): true if the samples contain speech-like energy. Whisper
-    /// hallucinates text on silent/noise-only audio, so the pipeline discards anything
-    /// that fails this check instead of injecting phantom text.
+    /// Result of the silence-guard analysis (F7a), with the numbers behind the
+    /// decision so a tripped guard is diagnosable from the logs.
+    struct SpeechCheck {
+        let voicedSeconds: Double
+        let noiseFloor: Float
+        let threshold: Float
+        let peakRMS: Float
+        /// Voiced-time test, plus an escape hatch: strong dynamic range (a clear
+        /// peak well above the floor) is speech-like even if quiet overall —
+        /// eating a real dictation is worse than a rare hallucination.
+        var containsSpeech: Bool {
+            voicedSeconds >= 0.2 || (peakRMS > max(0.01, noiseFloor * 6))
+        }
+    }
+
+    /// Silence guard (F7a): Whisper hallucinates text on silent/noise-only audio, so
+    /// the pipeline discards recordings with no speech-like energy instead of
+    /// injecting phantom text.
     ///
-    /// Energy VAD: frames count as voiced when their RMS clears a threshold set above
-    /// the recording's own noise floor, and we require ≥0.25 s of voiced audio total.
-    static func containsSpeech(_ samples: [Float]) -> Bool {
+    /// Energy VAD: 30 ms frames count as voiced when their RMS clears a threshold set
+    /// above the recording's own noise floor (20th percentile), so a fan or hum
+    /// doesn't count as speech, with an absolute floor for very quiet rooms.
+    static func analyzeSpeech(_ samples: [Float]) -> SpeechCheck {
         let frameSize = Int(targetSampleRate * 0.03) // 30 ms frames
-        guard samples.count >= frameSize else { return false }
+        guard samples.count >= frameSize else {
+            return SpeechCheck(voicedSeconds: 0, noiseFloor: 0, threshold: 0, peakRMS: 0)
+        }
 
         var frameRMS: [Float] = []
         frameRMS.reserveCapacity(samples.count / frameSize)
@@ -83,13 +101,15 @@ final class AudioRecorder {
             index += frameSize
         }
 
-        // Noise floor = 20th percentile; threshold scales with it so a fan or hum
-        // doesn't count as speech, with an absolute floor for very quiet rooms.
         let sorted = frameRMS.sorted()
         let noiseFloor = sorted[sorted.count / 5]
-        let threshold = max(0.012, noiseFloor * 3)
-        let voicedSeconds = Double(frameRMS.filter { $0 > threshold }.count) * 0.03
-        return voicedSeconds >= 0.25
+        let threshold = max(0.006, noiseFloor * 2.5)
+        return SpeechCheck(
+            voicedSeconds: Double(frameRMS.filter { $0 > threshold }.count) * 0.03,
+            noiseFloor: noiseFloor,
+            threshold: threshold,
+            peakRMS: sorted.last ?? 0
+        )
     }
 
     private func append(_ buffer: AVAudioPCMBuffer) {

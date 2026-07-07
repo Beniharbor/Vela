@@ -186,12 +186,18 @@ final class DictationController: ObservableObject {
 
         // F7a silence guard: never hand silence/noise to Whisper — it hallucinates
         // text, and that text would be pasted into the focused app.
-        guard AudioRecorder.containsSpeech(samples) else {
+        let speech = AudioRecorder.analyzeSpeech(samples)
+        let vadStats = String(
+            format: "voiced=%.2fs threshold=%.4f noiseFloor=%.4f peakRMS=%.4f",
+            speech.voicedSeconds, speech.threshold, speech.noiseFloor, speech.peakRMS
+        )
+        guard speech.containsSpeech else {
             state = .idle
             lastError = "No speech detected — nothing inserted"
-            log.info("Silence guard tripped: \(samples.count) samples discarded without transcription")
+            log.info("Silence guard tripped (\(vadStats, privacy: .public)): \(samples.count) samples discarded")
             return
         }
+        log.info("VAD passed: \(vadStats, privacy: .public)")
 
         Task {
             do {
