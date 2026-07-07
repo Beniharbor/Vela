@@ -17,6 +17,7 @@ struct SettingsView: View {
 private struct GeneralSettings: View {
     @AppStorage(AppSettings.Keys.triggerMode) private var triggerMode = TriggerMode.fnKey.rawValue
     @AppStorage(AppSettings.Keys.dictationStyle) private var styleRaw = DictationStyle.flow.rawValue
+    @AppStorage(AppSettings.Keys.dictationLanguage) private var language = "auto"
     @AppStorage(AppSettings.Keys.ollamaModel) private var ollamaModel = "qwen2.5:3b"
     @AppStorage(AppSettings.Keys.whisperModel) private var whisperModel = "large-v3-v20240930_626MB"
     @AppStorage(AppSettings.Keys.modelIdleUnloadSeconds) private var idleUnload = 120.0
@@ -36,12 +37,26 @@ private struct GeneralSettings: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+                Picker("Language:", selection: $language) {
+                    Text("Auto-detect — English, Spanish, …").tag("auto")
+                    Text("English").tag("en")
+                    Text("Spanish (Español)").tag("es")
+                }
                 Picker("Whisper model:", selection: $whisperModel) {
                     Text("large-v3 turbo, compressed ~0.6 GB (recommended)")
                         .tag("large-v3-v20240930_626MB")
                     Text("large-v3 turbo, full ~1.6 GB").tag("large-v3-v20240930")
                     Text("distil-large-v3 ~0.6 GB (faster)").tag("distil-large-v3")
-                    Text("base.en ~150 MB (lightest)").tag("base.en")
+                    Text("base.en ~150 MB (lightest, English only)").tag("base.en")
+                }
+                if whisperModel == "base.en" && language != "en" {
+                    Label {
+                        Text("base.en only understands English — pick another model to dictate in Spanish.")
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle")
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 }
                 Picker("Unload model after idle:", selection: $idleUnload) {
                     Text("30 seconds").tag(30.0)

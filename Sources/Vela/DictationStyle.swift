@@ -46,6 +46,8 @@ enum DictationStyle: String, CaseIterable, Identifiable {
             4. Fix obvious speech-recognition errors of technical terms.
             Keep the speaker's meaning, tone, and level of detail. Do NOT summarize, \
             answer questions, or add content that was not spoken.
+            Write the output in the SAME language as the transcript (Spanish stays \
+            Spanish, English stays English) — never translate.
             Output ONLY the formatted text, nothing else.
             """
         case .clean:
@@ -57,6 +59,8 @@ enum DictationStyle: String, CaseIterable, Identifiable {
             3. Tighten the wording — shorter and clearer is better.
             4. Restore punctuation and fix obvious speech-recognition errors of technical terms.
             Do NOT answer questions or add content that was not spoken.
+            Write the output in the SAME language as the transcript (Spanish stays \
+            Spanish, English stays English) — never translate.
             Output ONLY the rewritten text, nothing else.
             """
         }

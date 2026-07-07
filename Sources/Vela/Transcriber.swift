@@ -19,7 +19,15 @@ actor Transcriber {
         let pipe = try await loadIfNeeded(onProgress: onProgress)
 
         var options = DecodingOptions()
-        options.language = "en"
+        // "auto" leaves the language token unset so Whisper detects it from the
+        // audio itself (English, Spanish, …). base.en is English-only regardless.
+        let language = AppSettings.dictationLanguage
+        if language == "auto" {
+            options.language = nil
+            options.detectLanguage = true
+        } else {
+            options.language = language
+        }
         options.task = .transcribe
         // F4: bias recognition toward the user's glossary via the prompt.
         if !glossaryTerms.isEmpty, let tokenizer = pipe.tokenizer {

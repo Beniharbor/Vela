@@ -19,6 +19,7 @@ enum AppSettings {
     enum Keys {
         static let triggerMode = "triggerMode"
         static let dictationStyle = "dictationStyle"
+        static let dictationLanguage = "dictationLanguage"
         static let ollamaModel = "ollamaModel"
         static let whisperModel = "whisperModel"
         static let glossary = "glossary"
@@ -32,6 +33,8 @@ enum AppSettings {
             Keys.triggerMode: TriggerMode.fnKey.rawValue,
             // G3: ship in Flow (no LLM — lightest). Whisper already punctuates.
             Keys.dictationStyle: DictationStyle.flow.rawValue,
+            // "auto" = per-dictation language detection (English, Spanish, …).
+            Keys.dictationLanguage: "auto",
             Keys.ollamaModel: "qwen2.5:3b",
             // Argmax-compressed large-v3 turbo (~0.6 GB). See PRD §7.
             Keys.whisperModel: "large-v3-v20240930_626MB",
@@ -47,6 +50,8 @@ enum AppSettings {
     static var dictationStyle: DictationStyle {
         DictationStyle(rawValue: defaults.string(forKey: Keys.dictationStyle) ?? "") ?? .flow
     }
+    /// Whisper language code ("en", "es", …) or "auto" to detect per dictation.
+    static var dictationLanguage: String { defaults.string(forKey: Keys.dictationLanguage) ?? "auto" }
     static var ollamaModel: String { defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b" }
     static var whisperModel: String { defaults.string(forKey: Keys.whisperModel) ?? "large-v3-v20240930_626MB" }
     static var modelIdleUnloadSeconds: Double { defaults.double(forKey: Keys.modelIdleUnloadSeconds) }
