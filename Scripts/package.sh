@@ -21,6 +21,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Vela"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/Vela.icns "$APP/Contents/Resources/Vela.icns"
 
 # SPM resource bundles (e.g. KeyboardShortcuts localizations, WhisperKit resources)
 for bundle in .build/"$CONFIG"/*.bundle; do
@@ -42,7 +43,15 @@ echo "==> Done: $ROOT/$APP"
 if [ "$INSTALL" = "install" ]; then
   echo "==> Installing to /Applications"
   pkill -f "Vela.app/Contents/MacOS/Vela" 2>/dev/null || true
+  # rm first: ditto merges into the existing bundle, which keeps the same
+  # directory inode and leaves macOS's icon cache pointing at stale artwork.
+  rm -rf /Applications/Vela.app
   ditto "$APP" /Applications/Vela.app
+  # Refresh LaunchServices + Spotlight so the icon shows up immediately (macOS
+  # caches app icons aggressively; without this, Spotlight shows a generic icon).
+  touch /Applications/Vela.app
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/Vela.app
+  mdimport /Applications/Vela.app
   open /Applications/Vela.app
   echo "==> Installed and relaunched /Applications/Vela.app"
 else

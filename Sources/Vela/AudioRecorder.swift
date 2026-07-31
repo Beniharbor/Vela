@@ -3,7 +3,13 @@ import os
 
 /// Captures microphone audio and accumulates 16 kHz mono Float32 samples for Whisper (F1).
 final class AudioRecorder {
-    private let engine = AVAudioEngine()
+    /// Built per take, released on stop(). Deliberately not a long-lived `let`:
+    /// an AVAudioEngine whose inputNode has been touched keeps the input device
+    /// claimed for as long as the object exists, and CoreAudio then holds the
+    /// route in its capture-capable mode — which on Bluetooth means the headset
+    /// stays in the low-quality duplex profile and music sounds ducked/degraded
+    /// while Vela merely sits in the menu bar. Idle Vela must own no engine.
+    private var engine: AVAudioEngine?
     private var converter: AVAudioConverter?
     private var samples: [Float] = []
     private let lock = NSLock()
@@ -11,6 +17,10 @@ final class AudioRecorder {
 
     /// Called on the audio thread with a normalized 0–1 mic level per buffer (~10/s).
     var onLevel: (@Sendable (Float) -> Void)?
+    /// Called on the audio thread with each raw (native-format) buffer, e.g. for
+    /// the "watermelon" watchword listener — separate from the Whisper-bound,
+    /// downsampled `samples` this class accumulates.
+    var onBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
 
     static let targetSampleRate: Double = 16_000
 
@@ -33,10 +43,13 @@ final class AudioRecorder {
     }
 
     func start() throws {
+        // A previous take's engine would still be holding the device.
+        releaseEngine()
         lock.lock()
         samples.removeAll()
         lock.unlock()
 
+        let engine = AVAudioEngine()
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0 else {
@@ -45,22 +58,58 @@ final class AudioRecorder {
         converter = AVAudioConverter(from: inputFormat, to: targetFormat)
 
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+            self?.onBuffer?(buffer)
             self?.append(buffer)
         }
         engine.prepare()
-        try engine.start()
+        do {
+            try engine.start()
+        } catch {
+            // Don't leave a half-open engine (and a claimed input device) behind.
+            input.removeTap(onBus: 0)
+            converter = nil
+            throw error
+        }
+        self.engine = engine
         log.info("Recording started (\(inputFormat.sampleRate, privacy: .public) Hz input)")
+    }
+
+    /// Pauses capture without tearing down the engine — no samples accumulate
+    /// until resume(). The tap stays installed.
+    func pause() {
+        guard let engine, engine.isRunning else { return }
+        engine.pause()
+        lock.lock()
+        let captured = samples.count
+        lock.unlock()
+        log.info("Recording paused (\(Double(captured) / AudioRecorder.targetSampleRate, format: .fixed(precision: 1))s captured)")
+    }
+
+    func resume() throws {
+        guard let engine else { throw VelaError.audio("Nothing to resume") }
+        try engine.start()
+        log.info("Recording resumed")
     }
 
     /// Stops the engine and returns everything captured, as 16 kHz mono Float32.
     func stop() -> [Float] {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        converter = nil
+        releaseEngine()
         lock.lock()
         defer { lock.unlock() }
         log.info("Recording stopped: \(self.samples.count) samples (\(Double(self.samples.count) / AudioRecorder.targetSampleRate, format: .fixed(precision: 1))s)")
         return samples
+    }
+
+    /// Hands the microphone back to the system. Dropping the engine is the part
+    /// that matters — stopping it alone leaves the input unit instantiated and the
+    /// device claimed, which is what keeps other apps' audio degraded afterwards.
+    private func releaseEngine() {
+        guard let engine else { return }
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        engine.reset()
+        self.engine = nil
+        converter = nil
     }
 
     /// Result of the silence-guard analysis (F7a), with the numbers behind the

@@ -3,7 +3,11 @@ import WhisperKit
 import os
 
 /// WhisperKit wrapper with on-demand load and idle auto-unload (G3: light on RAM).
+/// Shared between dictation and voice-note import so the model is only ever
+/// resident once; the actor serializes concurrent transcriptions.
 actor Transcriber {
+    static let shared = Transcriber()
+
     private var whisperKit: WhisperKit?
     private var loadedModelName: String?
     private var unloadTask: Task<Void, Never>?
@@ -12,16 +16,41 @@ actor Transcriber {
     /// Progress callback: (phase label, fraction 0–1 or nil for indeterminate).
     typealias ProgressHandler = @Sendable (String, Double?) -> Void
 
+    struct Output {
+        let text: String
+        /// ISO code of the (detected or forced) language, e.g. "en".
+        let language: String
+    }
+
+    /// Warms the model while the user is still speaking so transcription starts the
+    /// instant recording stops. RAM is only held during the dictation — the idle
+    /// unload is re-armed by transcribe(), or by scheduleUnload() on cancel (G3).
+    func preload() async {
+        unloadTask?.cancel()
+        do {
+            _ = try await loadIfNeeded { _, _ in }
+        } catch {
+            log.warning("Preload failed (will retry at transcribe time): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Transcribes 16 kHz mono samples. Loads the model on first use (downloads it on
     /// the very first run — can take a while; subsequent loads come from disk).
-    func transcribe(samples: [Float], glossaryTerms: [String], onProgress: @escaping ProgressHandler) async throws -> String {
+    /// `languageOverride` bypasses the Languages setting (voice-note import
+    /// forces "en"); nil uses the setting as before.
+    func transcribe(
+        samples: [Float],
+        glossaryTerms: [String],
+        languageOverride: String? = nil,
+        onProgress: @escaping ProgressHandler
+    ) async throws -> Output {
         unloadTask?.cancel()
         let pipe = try await loadIfNeeded(onProgress: onProgress)
 
         var options = DecodingOptions()
         // "auto" leaves the language token unset so Whisper detects it from the
         // audio itself (English, Spanish, …). base.en is English-only regardless.
-        let language = AppSettings.dictationLanguage
+        let language = languageOverride ?? AppSettings.dictationLanguage
         if language == "auto" {
             options.language = nil
             options.detectLanguage = true
@@ -48,11 +77,23 @@ actor Transcriber {
         }
         defer { poller.cancel() }
 
-        let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
+        var results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
+        var text = Self.joinedText(results)
+
+        // Glossary biasing is best-effort: some models (large-v3 turbo among them)
+        // decode to nothing when a prompt is prefilled. Retry bare rather than
+        // swallow the dictation.
+        if text.isEmpty, options.promptTokens != nil {
+            log.warning("Empty transcript with glossary prompt — retrying without it")
+            options.promptTokens = nil
+            options.usePrefillPrompt = false
+            results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
+            text = Self.joinedText(results)
+        }
+
         scheduleUnload()
-        let text = results.map(\.text).joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return Self.stripTags(text)
+        let detected = results.first?.language ?? (language == "auto" ? "en" : language)
+        return Output(text: Self.stripTags(text), language: detected)
     }
 
     private func loadIfNeeded(onProgress: @escaping ProgressHandler) async throws -> WhisperKit {
@@ -103,7 +144,7 @@ actor Transcriber {
     }
 
     /// G3: drop the model from RAM after the configured idle period.
-    private func scheduleUnload() {
+    func scheduleUnload() {
         unloadTask?.cancel()
         let idle = max(AppSettings.modelIdleUnloadSeconds, 10)
         unloadTask = Task { [weak self] in
@@ -119,6 +160,11 @@ actor Transcriber {
         whisperKit = nil
         loadedModelName = nil
         log.info("Whisper model unloaded (idle)")
+    }
+
+    private static func joinedText(_ results: [TranscriptionResult]) -> String {
+        results.map(\.text).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Whisper emits special markers like <|startoftranscript|> in some edge cases.

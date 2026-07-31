@@ -25,14 +25,40 @@ final class DictationController: ObservableObject {
 
     @Published private(set) var state: State = .idle {
         didSet {
-            if state == .recording {
+            switch state {
+            case .recording:
+                // A new take interrupts a lingering Done bubble.
+                doneFlashTask?.cancel()
+                showingDone = false
                 micLevels = Array(repeating: 0, count: Self.levelBarCount)
+                recordingStarted = Date()
+                isPaused = false
+                pausedAt = nil
                 hud.show()
-            } else if oldValue == .recording {
+            case .transcribing, .cleaning:
+                // Keep the HUD up through the pipeline so the loading bar is visible.
+                hud.show()
+            case .idle:
+                if oldValue == .recording {
+                    recordingStarted = nil
+                    isPaused = false
+                    pausedAt = nil
+                }
+                // flashDone() re-shows the HUD right after, if applicable.
                 hud.hide()
             }
         }
     }
+    /// When the current recording began — drives the elapsed timer in the HUD.
+    /// Shifted forward on resume so paused time never counts as elapsed.
+    @Published private(set) var recordingStarted: Date?
+    /// True while recording is paused (bare Control tap toggles it).
+    @Published private(set) var isPaused = false
+    /// When the current pause began — freezes the HUD timer while paused.
+    @Published private(set) var pausedAt: Date?
+    /// True while the green "Done" bubble is flashed in the HUD after an insert (F11).
+    @Published private(set) var showingDone = false
+    private var doneFlashTask: Task<Void, Never>?
     @Published private(set) var lastError: String?
     /// Rolling mic-level history for the recording HUD (newest at the end).
     @Published private(set) var micLevels: [Float] = Array(repeating: 0, count: DictationController.levelBarCount)
@@ -40,18 +66,29 @@ final class DictationController: ObservableObject {
     private let hud = RecordingHUD()
     @Published private(set) var lastLatency: TimeInterval?
     @Published private(set) var lastTranscript: String?
+    /// True when the last dictation had no text field to paste into — the
+    /// transcript was left on the clipboard and offered in the menu instead.
+    @Published private(set) var lastInsertWasCopyOnly = false
     /// e.g. "Downloading model" + 0.42 while working; nil when idle.
     @Published private(set) var progressPhase: String?
     @Published private(set) var progressFraction: Double?
 
     private let recorder = AudioRecorder()
-    private let transcriber = Transcriber()
+    private let transcriber = Transcriber.shared
+    private let watchword = WatchwordListener()
+    /// Set when the current take is ending because "watermelon" was heard, so
+    /// stopAndProcess() knows to strip it back out of the transcript.
+    private var stoppedByWatchword = false
     private let fnMonitor = FnKeyMonitor()
     private let log = Logger(subsystem: "com.vela.app", category: "pipeline")
 
     /// F7b: recording hard-stops after this long and proceeds to transcription.
     private static let maxRecordingDuration: TimeInterval = 600
     private var maxDurationTask: Task<Void, Never>?
+
+    /// F10: switching style signals intent to dictate — tracks the last seen value
+    /// so the defaults observer only reacts to actual style changes.
+    private var lastKnownStyleID = AppSettings.dictationStyleID
 
     private var triggerName: String {
         AppSettings.triggerMode == .fnKey ? "Fn" : "the shortcut"
@@ -60,8 +97,16 @@ final class DictationController: ObservableObject {
     var statusLine: String {
         if let lastError { return "⚠️ \(lastError)" }
         switch state {
-        case .idle: return "Vela — press \(triggerName) to dictate"
-        case .recording: return "Recording… (\(triggerName) to insert · Esc to cancel)"
+        case .idle:
+            if lastInsertWasCopyOnly {
+                return "Nothing was focused — transcript is on the clipboard"
+            }
+            return "Vela — press \(triggerName) to dictate"
+        case .recording:
+            if isPaused {
+                return "Paused (Control to resume · \(triggerName) to insert · Esc to cancel)"
+            }
+            return "Recording… (\(triggerName) to insert · Control to pause · Esc to cancel)"
         case .transcribing:
             if let progressPhase {
                 if let progressFraction {
@@ -70,7 +115,7 @@ final class DictationController: ObservableObject {
                 return "\(progressPhase)…"
             }
             return "Transcribing…"
-        case .cleaning: return "Formatting (\(AppSettings.dictationStyle.displayName))…"
+        case .cleaning: return "Formatting (\(ModeStore.shared.selected.name))…"
         }
     }
 
@@ -89,6 +134,10 @@ final class DictationController: ObservableObject {
         recorder.onLevel = { [weak self] level in
             Task { @MainActor in self?.pushLevel(level) }
         }
+        recorder.onBuffer = { [weak self] buffer in
+            Task { @MainActor in self?.watchword.append(buffer) }
+        }
+        watchword.onDetected = { [weak self] in self?.watchwordDetected() }
 
         // Both triggers are press-to-toggle; the active one is checked at press time
         // so switching modes in Settings takes effect immediately.
@@ -99,6 +148,10 @@ final class DictationController: ObservableObject {
         // Esc cancels an in-progress recording regardless of trigger mode (F6).
         fnMonitor.onEscape = { [weak self] in
             self?.cancelRecording()
+        }
+        // Bare Control tap pauses/resumes the current recording (no-op when idle).
+        fnMonitor.onControlTap = { [weak self] in
+            self?.togglePause()
         }
         fnMonitor.start()
 
@@ -112,11 +165,62 @@ final class DictationController: ObservableObject {
         if AppSettings.triggerMode == .fnKey {
             TextInjector.ensureAccessibility(prompt: true)
         }
+
+        // F10: picking a different style (menu bar, HUD chip, or dashboard) means
+        // "I want to dictate in that style" — start listening without another Fn press.
+        lastKnownStyleID = AppSettings.dictationStyleID
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: UserDefaults.standard, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.styleDidChangeIfNeeded() }
+        }
+
         log.info("Dictation triggers registered (mode: \(AppSettings.triggerMode.rawValue, privacy: .public))")
     }
 
+    /// F10: style switch while idle starts a dictation; mid-recording it restarts
+    /// the take (discard audio so far, keep listening) — the user is re-doing it in
+    /// the new style. A running transcription is left alone.
+    private func styleDidChangeIfNeeded() {
+        let currentID = AppSettings.dictationStyleID
+        guard currentID != lastKnownStyleID else { return }
+        lastKnownStyleID = currentID
+        let current = ModeStore.shared.selected
+        switch state {
+        case .idle:
+            // F10 is for the menu bar / HUD pickers: switching there means "dictate
+            // now". Inside the dashboard it's configuration — don't grab the mic.
+            if NSApp.keyWindow?.identifier?.rawValue.contains("dashboard") == true {
+                log.info("Style switched to \(current.name, privacy: .public) from dashboard — not starting dictation")
+                return
+            }
+            log.info("Style switched to \(current.name, privacy: .public) — starting dictation")
+            startRecording()
+        case .recording:
+            log.info("Style switched to \(current.name, privacy: .public) mid-recording — restarting take")
+            _ = recorder.stop()
+            do {
+                try recorder.start()
+                micLevels = Array(repeating: 0, count: Self.levelBarCount)
+                recordingStarted = Date() // the take restarted — restart the timer too
+                isPaused = false
+                pausedAt = nil
+                scheduleMaxDurationStop()
+                // The new style may need the LLM that the old one didn't.
+                if current.usesLLM {
+                    Task { await OllamaCleanup.prewarm() }
+                }
+            } catch {
+                state = .idle
+                lastError = error.localizedDescription
+            }
+        case .transcribing, .cleaning:
+            break
+        }
+    }
+
     private func pushLevel(_ level: Float) {
-        guard state == .recording else { return }
+        guard state == .recording, !isPaused else { return }
         micLevels.removeFirst()
         micLevels.append(level)
     }
@@ -132,20 +236,68 @@ final class DictationController: ObservableObject {
     func startRecording() {
         guard state == .idle else { return }
         lastError = nil
+        lastInsertWasCopyOnly = false
         Task {
             guard await AudioRecorder.requestMicPermission() else {
                 self.lastError = "Microphone permission denied (System Settings → Privacy)"
                 return
             }
+            // Supplementary feature — a "no" here just means no voice stop-word
+            // for this take, not a blocked dictation.
+            let watchwordAuthorized = await WatchwordListener.requestAuthorization()
             // User may have released the key while the permission dialog was up.
             guard self.state == .idle else { return }
             do {
                 try self.recorder.start()
                 self.state = .recording
+                if watchwordAuthorized {
+                    self.watchword.start()
+                }
                 self.scheduleMaxDurationStop()
+                self.warmPipeline()
             } catch {
                 self.lastError = error.localizedDescription
             }
+        }
+    }
+
+    /// Voice stop-word: saying "watermelon" mid-dictation ends recording and
+    /// pastes what came before it, like releasing the trigger key.
+    private func watchwordDetected() {
+        guard state == .recording else { return }
+        stoppedByWatchword = true
+        log.info("Stop-word \"watermelon\" detected — stopping recording")
+        stopAndProcess()
+    }
+
+    /// Bare Control tap while recording: pause capture; tap again to resume.
+    /// Paused time doesn't count toward the elapsed timer or the 10-min cap.
+    func togglePause() {
+        guard state == .recording else { return }
+        if isPaused {
+            do {
+                try recorder.resume()
+            } catch {
+                lastError = "Couldn't resume: \(error.localizedDescription)"
+                log.error("Resume failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            // Shift the start forward by the pause length so elapsed stays honest.
+            if let pausedAt, let started = recordingStarted {
+                recordingStarted = started.addingTimeInterval(Date().timeIntervalSince(pausedAt))
+            }
+            pausedAt = nil
+            isPaused = false
+            scheduleMaxDurationStop()
+            log.info("Recording resumed via Control")
+        } else {
+            recorder.pause()
+            pausedAt = Date()
+            isPaused = true
+            maxDurationTask?.cancel()
+            maxDurationTask = nil
+            micLevels = Array(repeating: 0, count: Self.levelBarCount)
+            log.info("Recording paused via Control")
         }
     }
 
@@ -155,8 +307,21 @@ final class DictationController: ObservableObject {
         maxDurationTask?.cancel()
         maxDurationTask = nil
         _ = recorder.stop()
+        watchword.stop()
+        stoppedByWatchword = false
         state = .idle
         log.info("Recording cancelled via Esc — audio discarded")
+        // The preloaded Whisper model would otherwise stay resident forever (G3).
+        Task { await transcriber.scheduleUnload() }
+    }
+
+    /// Latency: load the Whisper model (and the LLM for styles that use it) while
+    /// the user is speaking, so processing starts the instant recording stops.
+    private func warmPipeline() {
+        Task { await transcriber.preload() }
+        if ModeStore.shared.selected.usesLLM {
+            Task { await OllamaCleanup.prewarm() }
+        }
     }
 
     /// F7b: hard-stop after 10 minutes and proceed to transcription.
@@ -176,7 +341,10 @@ final class DictationController: ObservableObject {
         maxDurationTask = nil
         let released = Date()
         let samples = recorder.stop()
+        watchword.stop()
         state = .transcribing
+        let wasStoppedByWatchword = stoppedByWatchword
+        stoppedByWatchword = false
 
         // Ignore accidental taps shorter than ~0.3 s of audio.
         guard Double(samples.count) / AudioRecorder.targetSampleRate > 0.3 else {
@@ -203,11 +371,17 @@ final class DictationController: ObservableObject {
             do {
                 let glossary = AppSettings.glossaryTerms
                 let sttStart = Date()
-                let raw = try await self.transcriber.transcribe(samples: samples, glossaryTerms: glossary) { phase, fraction in
+                let stt = try await self.transcriber.transcribe(samples: samples, glossaryTerms: glossary) { phase, fraction in
                     Task { @MainActor in
                         self.progressPhase = phase
                         self.progressFraction = fraction
                     }
+                }
+                // F12: strip ums/uhs and awkward spacing for every style — Flow
+                // included, which never sees the LLM.
+                var raw = TranscriptFilter.clean(stt.text)
+                if wasStoppedByWatchword {
+                    raw = TranscriptFilter.strippingTrailingStopWord(raw, word: WatchwordListener.word)
                 }
                 self.progressPhase = nil
                 self.progressFraction = nil
@@ -219,28 +393,50 @@ final class DictationController: ObservableObject {
                 }
 
                 var final = raw
-                let style = AppSettings.dictationStyle
-                if style.usesLLM {
+                let mode = ModeStore.shared.selected
+                if mode.usesLLM {
                     self.state = .cleaning
                     do {
-                        final = try await OllamaCleanup.clean(raw, style: style, glossaryTerms: glossary)
+                        final = try await OllamaCleanup.clean(raw, mode: mode, glossaryTerms: glossary, language: stt.language)
                     } catch {
                         // Styling is best-effort: fall back to the raw transcript.
-                        self.log.error("\(style.displayName, privacy: .public) styling failed, using raw transcript: \(error.localizedDescription, privacy: .public)")
+                        self.log.error("\(mode.name, privacy: .public) styling failed, using raw transcript: \(error.localizedDescription, privacy: .public)")
                     }
                 }
 
-                TextInjector.inject(final)
+                let outcome = TextInjector.inject(final)
+                self.lastInsertWasCopyOnly = (outcome == .copiedOnly)
                 self.lastTranscript = final
                 self.lastLatency = Date().timeIntervalSince(released)
+                HistoryStore.shared.add(
+                    text: final,
+                    duration: Double(samples.count) / AudioRecorder.targetSampleRate,
+                    language: stt.language
+                )
                 self.log.info("End-to-end (release → inject): \(self.lastLatency ?? 0, format: .fixed(precision: 2))s")
                 self.state = .idle
+                self.flashDone()
             } catch {
                 self.lastError = error.localizedDescription
                 self.log.error("Pipeline failed: \(error.localizedDescription, privacy: .public)")
                 self.progressPhase = nil
                 self.progressFraction = nil
                 self.state = .idle
+            }
+        }
+    }
+
+    /// F11: pop the green "Done" bubble where the recording pill was, then fade out.
+    private func flashDone() {
+        doneFlashTask?.cancel()
+        showingDone = true
+        hud.show()
+        doneFlashTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.4))
+            guard !Task.isCancelled, let self else { return }
+            self.showingDone = false
+            if self.state != .recording {
+                self.hud.hide(fade: true)
             }
         }
     }

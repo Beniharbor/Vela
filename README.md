@@ -74,6 +74,8 @@ Sources/Vela/
   TextInjector.swift       clipboard + ⌘V injection, Unicode fallback
   AppSettings.swift        defaults + glossary
   SettingsView.swift       settings window
+  HistoryStore.swift       dictation history model + JSON persistence
+  DashboardView.swift      Dashboard window: history, languages, modes, settings
 Resources/Info.plist       LSUIElement agent app, mic usage string
 Scripts/package.sh         SPM build → Vela.app bundle + ad-hoc codesign
 ```

@@ -1,0 +1,192 @@
+import Foundation
+import os
+
+/// One transcribed voice note, as shown in the Voice Notes tab.
+struct VoiceNoteRecord: Codable, Identifiable, Equatable {
+    let id: UUID
+    /// Original file name, e.g. "WhatsApp Audio 2026-07-17 at 09.12.44.ogg".
+    let fileName: String
+    /// When the file was imported (not when the voice note was recorded).
+    let date: Date
+    /// Audio length in seconds.
+    let duration: TimeInterval
+    let words: Int
+    let text: String
+
+    /// First few words of the transcript, used as the row title.
+    var title: String {
+        let words = text.split(whereSeparator: \.isWhitespace).prefix(6)
+        var title = words.joined(separator: " ")
+        while title.hasSuffix(".") || title.hasSuffix(",") || title.hasSuffix(":") {
+            title.removeLast()
+        }
+        return title.isEmpty ? "Untitled" : title
+    }
+}
+
+/// Imports audio files (WhatsApp voice notes), transcribes them sequentially,
+/// and persists the results as JSON in ~/Library/Application Support/Vela/.
+@MainActor
+final class VoiceNotesStore: ObservableObject {
+    static let shared = VoiceNotesStore()
+
+    /// Finished transcriptions, newest first.
+    @Published private(set) var notes: [VoiceNoteRecord] = []
+    /// Files queued or in flight, in import order.
+    @Published private(set) var pending: [PendingVoiceNote] = []
+
+    struct PendingVoiceNote: Identifiable, Equatable {
+        let id: UUID
+        let fileName: String
+        var phase: String
+        /// 0–1 while transcribing; nil when indeterminate.
+        var fraction: Double?
+        var failed = false
+    }
+
+    private var queue: [(id: UUID, url: URL)] = []
+    private var working = false
+    private let log = Logger(subsystem: "com.vela.app", category: "voicenotes")
+
+    private let fileURL: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Vela", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("voice-notes.json")
+    }()
+
+    private init() {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let data = try? Data(contentsOf: fileURL),
+           let loaded = try? decoder.decode([VoiceNoteRecord].self, from: data) {
+            notes = loaded
+        }
+    }
+
+    // MARK: Import pipeline
+
+    func importFiles(_ urls: [URL]) {
+        for url in urls {
+            guard AudioFileImporter.supportedExtensions.contains(url.pathExtension.lowercased()) else {
+                let id = UUID()
+                pending.append(PendingVoiceNote(
+                    id: id,
+                    fileName: url.lastPathComponent,
+                    phase: "Unsupported file type",
+                    fraction: nil,
+                    failed: true
+                ))
+                continue
+            }
+            let id = UUID()
+            pending.append(PendingVoiceNote(id: id, fileName: url.lastPathComponent, phase: "Waiting…", fraction: nil))
+            queue.append((id, url))
+        }
+        processNext()
+    }
+
+    private func processNext() {
+        guard !working, let job = queue.first else { return }
+        queue.removeFirst()
+        working = true
+        update(job.id, phase: "Reading file…", fraction: nil)
+
+        Task {
+            do {
+                // Decode off the main thread — multi-minute files take a moment.
+                let url = job.url
+                let didScope = url.startAccessingSecurityScopedResource()
+                let samples = try await Task.detached(priority: .userInitiated) {
+                    try AudioFileImporter.load(url: url)
+                }.value
+                if didScope { url.stopAccessingSecurityScopedResource() }
+
+                let duration = Double(samples.count) / AudioRecorder.targetSampleRate
+                guard duration > 0.3 else {
+                    throw VelaError.audio("File is too short to transcribe")
+                }
+
+                // Always auto-detect, ignoring the Languages setting: voice
+                // notes are often Spanglish, and forcing one language turns the
+                // other into gibberish. Detection is per ~30 s window, so mixed
+                // notes come out in whichever language each stretch was spoken.
+                let stt = try await Transcriber.shared.transcribe(
+                    samples: samples,
+                    glossaryTerms: AppSettings.glossaryTerms,
+                    languageOverride: "auto"
+                ) { phase, fraction in
+                    Task { @MainActor in
+                        self.update(job.id, phase: "\(phase)…", fraction: fraction)
+                    }
+                }
+                let text = TranscriptFilter.clean(stt.text)
+                guard !text.isEmpty else {
+                    throw VelaError.transcription("No speech recognized in this file")
+                }
+
+                // Fresh UUID, never job.id: the pending row (keyed by job.id)
+                // leaves one ForEach as this record enters another in the same
+                // update — a shared id corrupts LazyVStack's diff and the list
+                // silently stops re-rendering (rows freeze at their last state).
+                let record = VoiceNoteRecord(
+                    id: UUID(),
+                    fileName: job.url.lastPathComponent,
+                    date: Date(),
+                    duration: duration,
+                    words: text.split(whereSeparator: \.isWhitespace).count,
+                    text: text
+                )
+                self.pending.removeAll { $0.id == job.id }
+                self.notes.insert(record, at: 0)
+                self.save()
+                self.log.info("Transcribed \(job.url.lastPathComponent, privacy: .public): \(record.words) words from \(duration, format: .fixed(precision: 1))s")
+            } catch {
+                self.log.error("Import failed for \(job.url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                if let index = self.pending.firstIndex(where: { $0.id == job.id }) {
+                    self.pending[index].phase = error.localizedDescription
+                    self.pending[index].fraction = nil
+                    self.pending[index].failed = true
+                }
+            }
+            self.working = false
+            self.processNext()
+        }
+    }
+
+    private func update(_ id: UUID, phase: String, fraction: Double?) {
+        guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
+        pending[index].phase = phase
+        pending[index].fraction = fraction
+    }
+
+    /// Removes a failed row from the pending list.
+    func dismiss(_ item: PendingVoiceNote) {
+        pending.removeAll { $0.id == item.id }
+    }
+
+    func delete(_ record: VoiceNoteRecord) {
+        notes.removeAll { $0.id == record.id }
+        save()
+    }
+
+    /// All transcripts, oldest first, formatted for pasting into Claude.
+    var combinedTranscripts: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy"
+        return notes.reversed().enumerated().map { index, note in
+            let total = Int(note.duration.rounded())
+            let length = "\(total / 60):" + String(format: "%02d", total % 60)
+            return "Voice note \(index + 1) — \(formatter.string(from: note.date)) (\(length)):\n\(note.text)"
+        }
+        .joined(separator: "\n\n")
+    }
+
+    private func save() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(notes) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+}

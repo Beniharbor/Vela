@@ -1,26 +1,58 @@
 import SwiftUI
 import AVFoundation
 import KeyboardShortcuts
+import Speech
 
 struct SettingsView: View {
+    /// True when hosted inside the Dashboard window (fills the pane instead of a fixed sheet size).
+    var embedded = false
+    @State private var tab: SettingsTab = .general
+
+    private enum SettingsTab: String, CaseIterable {
+        case general = "General", vocabulary = "Vocabulary"
+    }
+
     var body: some View {
-        TabView {
-            GeneralSettings()
-                .tabItem { Label("General", systemImage: "gearshape") }
-            VocabularySettings()
-                .tabItem { Label("Vocabulary", systemImage: "text.book.closed") }
+        VStack(spacing: 0) {
+            // A plain in-content segmented control, not a native TabView: TabView's
+            // tab picker gets hoisted into the window's toolbar on macOS, which
+            // would grow the shared Dashboard title bar only while Settings is open.
+            Picker("", selection: $tab) {
+                ForEach(SettingsTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 280)
+            .padding(.top, 14)
+            .padding(.bottom, 6)
+
+            Group {
+                switch tab {
+                case .general: GeneralSettings()
+                case .vocabulary: VocabularySettings()
+                }
+            }
         }
-        .frame(width: 480, height: 360)
+        .frame(
+            width: embedded ? nil : 480,
+            height: embedded ? nil : 420
+        )
     }
 }
 
 private struct GeneralSettings: View {
     @AppStorage(AppSettings.Keys.triggerMode) private var triggerMode = TriggerMode.fnKey.rawValue
-    @AppStorage(AppSettings.Keys.dictationStyle) private var styleRaw = DictationStyle.flow.rawValue
+    @AppStorage(AppSettings.Keys.dictationStyle) private var styleRaw = "flow"
+    @ObservedObject private var modeStore = ModeStore.shared
     @AppStorage(AppSettings.Keys.dictationLanguage) private var language = "auto"
     @AppStorage(AppSettings.Keys.ollamaModel) private var ollamaModel = "qwen2.5:3b"
     @AppStorage(AppSettings.Keys.whisperModel) private var whisperModel = "large-v3-v20240930_626MB"
     @AppStorage(AppSettings.Keys.modelIdleUnloadSeconds) private var idleUnload = 120.0
+    @AppStorage(AppSettings.Keys.userName) private var userName = ""
+
+    private var selectedMode: DictationMode {
+        modeStore.modes.first { $0.id == styleRaw } ?? modeStore.selected
+    }
 
     var body: some View {
         Form {
@@ -67,15 +99,21 @@ private struct GeneralSettings: View {
 
             Section("Style") {
                 Picker("Style:", selection: $styleRaw) {
-                    ForEach(DictationStyle.allCases) { style in
-                        Text("\(style.displayName) — \(style.menuDescription)")
-                            .tag(style.rawValue)
+                    ForEach(modeStore.modes) { mode in
+                        Text("\(mode.name) — \(mode.detail)")
+                            .tag(mode.id)
                     }
                 }
-                Text("Flow inserts your words verbatim with no LLM (lightest). Structured and Clean rewrite with a local LLM. You can also switch styles from the dropdown in the recording pill.")
+                Text("Modes with a system prompt rewrite with a local LLM; a mode without one (Flow) inserts your words as spoken. Rename modes, edit their prompts, or create new ones in the Dashboard → Modes. You can also switch modes from the dropdown in the recording pill.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                if let style = DictationStyle(rawValue: styleRaw), style.usesLLM {
+                if selectedMode.systemPrompt.contains("{name}") {
+                    TextField("Sign-off name:", text: $userName, prompt: Text("Mateo"))
+                    Text("Replaces {name} in the mode's prompt — e.g. to close emails with “Best, \(userName.isEmpty ? "…" : userName)”.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if selectedMode.usesLLM {
                     Picker("LLM model:", selection: $ollamaModel) {
                         Text("qwen2.5:3b (balanced)").tag("qwen2.5:3b")
                         Text("gemma2:2b (lighter)").tag("gemma2:2b")
@@ -101,19 +139,31 @@ private struct GeneralSettings: View {
 private struct PermissionsSection: View {
     @State private var axGranted = false
     @State private var micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    @State private var speechStatus = SFSpeechRecognizer.authorizationStatus()
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Section("Permissions") {
             LabeledContent("Microphone (to hear you)") {
-                statusBadge(micGranted: micStatus)
+                statusBadge(granted: micStatus == .authorized, notDetermined: micStatus == .notDetermined)
             }
             LabeledContent("Accessibility (to insert text & catch Fn)") {
                 badge(granted: axGranted)
             }
+            LabeledContent("Speech Recognition (for the \"watermelon\" stop-word)") {
+                statusBadge(granted: speechStatus == .authorized, notDetermined: speechStatus == .notDetermined)
+            }
             Button("Open Privacy & Security settings…") {
-                let pane = axGranted && micStatus != .authorized
-                    ? "Privacy_Microphone" : "Privacy_Accessibility"
+                let pane: String
+                if micStatus != .authorized {
+                    pane = "Privacy_Microphone"
+                } else if !axGranted {
+                    pane = "Privacy_Accessibility"
+                } else if speechStatus != .authorized {
+                    pane = "Privacy_SpeechRecognition"
+                } else {
+                    pane = "Privacy_Accessibility"
+                }
                 if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
                     NSWorkspace.shared.open(url)
                 }
@@ -129,16 +179,17 @@ private struct PermissionsSection: View {
     private func update() {
         axGranted = TextInjector.ensureAccessibility(prompt: false)
         micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        speechStatus = SFSpeechRecognizer.authorizationStatus()
     }
 
     @ViewBuilder
-    private func statusBadge(micGranted status: AVAuthorizationStatus) -> some View {
-        if status == .notDetermined {
+    private func statusBadge(granted: Bool, notDetermined: Bool) -> some View {
+        if notDetermined {
             // macOS simply hasn't asked yet — the first recording will.
             Label("Will ask on first use", systemImage: "questionmark.circle")
                 .foregroundStyle(.secondary)
         } else {
-            badge(granted: status == .authorized)
+            badge(granted: granted)
         }
     }
 

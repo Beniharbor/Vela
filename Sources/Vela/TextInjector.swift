@@ -14,13 +14,89 @@ enum TextInjector {
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    static func inject(_ text: String) {
-        guard !text.isEmpty else { return }
+    enum Outcome {
+        /// Synthetic ⌘V sent to a focused editable element (clipboard restored after).
+        case pasted
+        /// No editable element focused — transcript left on the clipboard instead.
+        case copiedOnly
+        case failed
+    }
+
+    @discardableResult
+    static func inject(_ text: String) -> Outcome {
+        guard !text.isEmpty else { return .failed }
         guard ensureAccessibility(prompt: true) else {
             log.error("Accessibility not granted; cannot inject")
-            return
+            return .failed
+        }
+        guard isLikelyEditableContext() else {
+            // Nothing to paste into (user clicked away, desktop focused, …):
+            // keep the transcript on the clipboard so it isn't lost.
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+            log.info("No editable element focused — transcript left on clipboard")
+            return .copiedOnly
         }
         pasteViaClipboard(text)
+        return .pasted
+    }
+
+    /// True when the system-wide focused UI element can take text. Errs toward
+    /// pasting: any settable value, text-like role, or selection range counts —
+    /// only a clearly non-editable focus (desktop, button, none at all) fails.
+    private static func hasEditableFocus() -> Bool {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+            let focusedRef, CFGetTypeID(focusedRef) == AXUIElementGetTypeID()
+        else { return false }
+        let element = focusedRef as! AXUIElement
+
+        var settable = DarwinBoolean(false)
+        if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success,
+           settable.boolValue {
+            return true
+        }
+
+        var roleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        if let role = roleRef as? String,
+           [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) {
+            return true
+        }
+
+        // Terminals and custom editors often expose only a selection range.
+        var names: CFArray?
+        if AXUIElementCopyAttributeNames(element, &names) == .success,
+           let attributes = names as? [String],
+           attributes.contains(kAXSelectedTextRangeAttribute) {
+            return true
+        }
+        return false
+    }
+
+    /// Contexts with no dictation target at all — the only cases worth refusing
+    /// to paste into. Everything else defaults to pasting: many canvas-rendered
+    /// editors and Electron apps (VS Code, Cursor, Slack, terminals, …) don't
+    /// report AX focus/value/selection attributes, so `hasEditableFocus()`
+    /// false-negatives constantly. A blind ⌘V is harmless in a real app; it's
+    /// only actively bad on the Finder desktop (drops a clipping file) or
+    /// system chrome (Dock, menu bar, notifications) that can't take text.
+    private static let noPasteTargetBundleIDs: Set<String> = [
+        "com.apple.finder",
+        "com.apple.dock",
+        "com.apple.systemuiserver",
+        "com.apple.notificationcenterui",
+        "com.apple.controlcenter",
+        "com.apple.loginwindow",
+    ]
+
+    private static func isLikelyEditableContext() -> Bool {
+        if hasEditableFocus() { return true }
+        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
+        return !noPasteTargetBundleIDs.contains(app.bundleIdentifier ?? "")
     }
 
     private static func pasteViaClipboard(_ text: String) {
