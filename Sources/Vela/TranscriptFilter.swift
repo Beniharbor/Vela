@@ -25,7 +25,21 @@ enum TranscriptFilter {
         // A removed sentence-initial filler can orphan its punctuation ("Um. So" → ". So").
         s = s.replacingOccurrences(of: #"^\s*[,.!?;:]+\s*"#, with: "", options: .regularExpression)
         s = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        return capitalizeSentenceStarts(s)
+        return applyingReplacements(capitalizeSentenceStarts(s))
+    }
+
+    /// F4: vocabulary rules ("Alphabet -> Alfavet"). Whole words only, any
+    /// capitalization, flexible spacing for multi-word forms; possessives and
+    /// plurals survive ("Alphabet's" → "Alfavet's").
+    static func applyingReplacements(_ text: String, rules: [(from: String, to: String)] = AppSettings.replacementRules) -> String {
+        var s = text
+        for rule in rules {
+            let words = rule.from.split(whereSeparator: \.isWhitespace).map { NSRegularExpression.escapedPattern(for: String($0)) }
+            guard !words.isEmpty else { continue }
+            let pattern = #"(?i)(?<![\p{L}\p{N}])"# + words.joined(separator: #"[\s-]+"#) + #"(?![\p{L}\p{N}])"#
+            s = s.replacingOccurrences(of: pattern, with: NSRegularExpression.escapedTemplate(for: rule.to), options: .regularExpression)
+        }
+        return s
     }
 
     /// Strips a voice stop-word (e.g. "watermelon") said to end dictation early,

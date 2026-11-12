@@ -26,6 +26,8 @@
 	<string>Vela needs the microphone to transcribe your dictation — everything stays on this Mac.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Vela listens on-device for the word "watermelon" to stop a dictation by voice — everything stays on this Mac.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Vela uses Apple Events to paste dictated text into the app you're using.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Personal use.</string>
 </dict>

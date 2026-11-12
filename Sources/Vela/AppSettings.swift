@@ -75,11 +75,67 @@ enum AppSettings {
         (defaults.string(forKey: Keys.userName) ?? "").trimmingCharacters(in: .whitespaces)
     }
 
-    /// One term per line. Used for Whisper prompt biasing + LLM canonicalization (F4).
-    static var glossaryTerms: [String] {
+    /// One vocabulary entry per line (F4). Either a plain term ("Alfavet") or a
+    /// replacement rule: "Alphabet -> Alfavet" (also "→" / "=>"; several
+    /// misheard forms may be comma-separated on the left).
+    struct GlossaryEntry: Hashable {
+        let line: String
+        let term: String
+        let misheard: [String]
+    }
+
+    static var glossaryLines: [String] {
         (defaults.string(forKey: Keys.glossary) ?? "")
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    static func parseGlossaryLine(_ line: String) -> GlossaryEntry {
+        for arrow in ["->", "→", "=>"] {
+            if let range = line.range(of: arrow) {
+                let term = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
+                let misheard = line[..<range.lowerBound]
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty && $0.caseInsensitiveCompare(term) != .orderedSame }
+                if !term.isEmpty { return GlossaryEntry(line: line, term: term, misheard: misheard) }
+            }
+        }
+        return GlossaryEntry(line: line, term: line, misheard: [])
+    }
+
+    static var glossaryEntries: [GlossaryEntry] { glossaryLines.map(parseGlossaryLine) }
+
+    /// Correct spellings only — fed to Whisper's prompt and the LLM styles.
+    static var glossaryTerms: [String] { glossaryEntries.map(\.term) }
+
+    /// (misheard, correct) pairs applied to every transcript.
+    static var replacementRules: [(from: String, to: String)] {
+        glossaryEntries.flatMap { entry in entry.misheard.map { ($0, entry.term) } }
+    }
+
+    /// Adds a term (and optional misheard form) to the vocabulary. If the term
+    /// is already listed, the misheard form is merged into its line.
+    static func addGlossaryEntry(term rawTerm: String, misheard rawMisheard: String) {
+        let term = rawTerm.trimmingCharacters(in: .whitespaces)
+        let misheard = rawMisheard.trimmingCharacters(in: .whitespaces)
+        guard !term.isEmpty else { return }
+        var lines = glossaryLines
+        if let index = lines.firstIndex(where: { parseGlossaryLine($0).term.caseInsensitiveCompare(term) == .orderedSame }) {
+            let existing = parseGlossaryLine(lines[index])
+            guard !misheard.isEmpty,
+                  !existing.misheard.contains(where: { $0.caseInsensitiveCompare(misheard) == .orderedSame })
+            else { return }
+            lines[index] = (existing.misheard + [misheard]).joined(separator: ", ") + " -> " + existing.term
+        } else {
+            lines.append(misheard.isEmpty ? term : "\(misheard) -> \(term)")
+        }
+        defaults.set(lines.joined(separator: "\n"), forKey: Keys.glossary)
+    }
+
+    static func removeGlossaryLine(_ line: String) {
+        let lines = glossaryLines.filter { $0 != line }
+        defaults.set(lines.joined(separator: "\n"), forKey: Keys.glossary)
     }
 }

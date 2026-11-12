@@ -10,8 +10,34 @@ struct VoiceNoteRecord: Codable, Identifiable, Equatable {
     let date: Date
     /// Audio length in seconds.
     let duration: TimeInterval
-    let words: Int
-    let text: String
+    var words: Int
+    /// The plain transcript — always present, the "one block" view.
+    var text: String
+    /// Who-said-what, when two or more voices were detected. nil for
+    /// single-speaker files and notes imported before speaker detection.
+    var turns: [ConversationTurn]? = nil
+    /// User-given names, indexed by speaker number; missing/empty → "Speaker N".
+    var speakerNames: [String]? = nil
+
+    var isConversation: Bool { (turns?.count ?? 0) > 1 }
+
+    func speakerName(_ speaker: Int) -> String {
+        if let names = speakerNames, speaker < names.count {
+            let name = names[speaker].trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty { return name }
+        }
+        return "Speaker \(speaker + 1)"
+    }
+
+    /// "Name: …" lines, one per turn, for pasting elsewhere.
+    var conversationText: String {
+        guard let turns, isConversation else { return text }
+        return turns.map { "\(speakerName($0.speaker)): \($0.text)" }.joined(separator: "\n\n")
+    }
+
+    func exportText(asConversation: Bool) -> String {
+        asConversation ? conversationText : text
+    }
 
     /// First few words of the transcript, used as the row title.
     var title: String {
@@ -34,6 +60,8 @@ final class VoiceNotesStore: ObservableObject {
     @Published private(set) var notes: [VoiceNoteRecord] = []
     /// Files queued or in flight, in import order.
     @Published private(set) var pending: [PendingVoiceNote] = []
+    /// False when voice-notes.json is unreadable and couldn't be backed up — see SafeStorage.
+    private var canSave = true
 
     struct PendingVoiceNote: Identifiable, Equatable {
         let id: UUID
@@ -58,10 +86,9 @@ final class VoiceNotesStore: ObservableObject {
     private init() {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        if let data = try? Data(contentsOf: fileURL),
-           let loaded = try? decoder.decode([VoiceNoteRecord].self, from: data) {
-            notes = loaded
-        }
+        let loaded = SafeStorage.loadArray(VoiceNoteRecord.self, from: fileURL, decoder: decoder)
+        notes = loaded.items
+        canSave = loaded.canSave
     }
 
     // MARK: Import pipeline
@@ -114,7 +141,8 @@ final class VoiceNotesStore: ObservableObject {
                 let stt = try await Transcriber.shared.transcribe(
                     samples: samples,
                     glossaryTerms: AppSettings.glossaryTerms,
-                    languageOverride: "auto"
+                    languageOverride: "auto",
+                    wordTimestamps: true
                 ) { phase, fraction in
                     Task { @MainActor in
                         self.update(job.id, phase: "\(phase)…", fraction: fraction)
@@ -123,6 +151,23 @@ final class VoiceNotesStore: ObservableObject {
                 let text = TranscriptFilter.clean(stt.text)
                 guard !text.isEmpty else {
                     throw VelaError.transcription("No speech recognized in this file")
+                }
+
+                // Best-effort: if speaker detection fails (e.g. first-run model
+                // download offline), keep the plain transcript rather than lose it.
+                self.update(job.id, phase: "Identifying speakers…", fraction: nil)
+                var turns: [ConversationTurn]?
+                do {
+                    turns = try await SpeakerDiarizer.shared.turns(
+                        samples: samples,
+                        transcription: stt.results
+                    ) { fraction in
+                        Task { @MainActor in
+                            self.update(job.id, phase: "Identifying speakers…", fraction: fraction)
+                        }
+                    }
+                } catch {
+                    self.log.error("Speaker detection failed for \(job.url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
 
                 // Fresh UUID, never job.id: the pending row (keyed by job.id)
@@ -135,7 +180,8 @@ final class VoiceNotesStore: ObservableObject {
                     date: Date(),
                     duration: duration,
                     words: text.split(whereSeparator: \.isWhitespace).count,
-                    text: text
+                    text: text,
+                    turns: turns
                 )
                 self.pending.removeAll { $0.id == job.id }
                 self.notes.insert(record, at: 0)
@@ -170,19 +216,54 @@ final class VoiceNotesStore: ObservableObject {
         save()
     }
 
+    /// Applies the vocabulary's replacement rules ("Alphabet -> Alfavet") to
+    /// notes already transcribed. Returns how many notes changed.
+    @discardableResult
+    func applyVocabularyToExistingNotes() -> Int {
+        let rules = AppSettings.replacementRules
+        guard !rules.isEmpty else { return 0 }
+        var changed = 0
+        for index in notes.indices {
+            var note = notes[index]
+            note.text = TranscriptFilter.applyingReplacements(note.text, rules: rules)
+            note.turns = note.turns?.map {
+                ConversationTurn(speaker: $0.speaker, start: $0.start,
+                                 text: TranscriptFilter.applyingReplacements($0.text, rules: rules))
+            }
+            note.words = note.text.split(whereSeparator: \.isWhitespace).count
+            if note != notes[index] {
+                notes[index] = note
+                changed += 1
+            }
+        }
+        if changed > 0 { save() }
+        log.info("Vocabulary re-applied: \(changed) note(s) updated")
+        return changed
+    }
+
+    func renameSpeaker(_ speaker: Int, in note: VoiceNoteRecord, to name: String) {
+        guard let index = notes.firstIndex(where: { $0.id == note.id }) else { return }
+        var names = notes[index].speakerNames ?? []
+        while names.count <= speaker { names.append("") }
+        names[speaker] = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        notes[index].speakerNames = names
+        save()
+    }
+
     /// All transcripts, oldest first, formatted for pasting into Claude.
-    var combinedTranscripts: String {
+    func combinedTranscripts(asConversation: Bool) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d, yyyy"
         return notes.reversed().enumerated().map { index, note in
             let total = Int(note.duration.rounded())
             let length = "\(total / 60):" + String(format: "%02d", total % 60)
-            return "Voice note \(index + 1) — \(formatter.string(from: note.date)) (\(length)):\n\(note.text)"
+            return "Voice note \(index + 1) — \(formatter.string(from: note.date)) (\(length)):\n\(note.exportText(asConversation: asConversation))"
         }
         .joined(separator: "\n\n")
     }
 
     private func save() {
+        guard canSave else { return }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         if let data = try? encoder.encode(notes) {

@@ -99,6 +99,10 @@ enum TextInjector {
         return !noPasteTargetBundleIDs.contains(app.bundleIdentifier ?? "")
     }
 
+    /// Marks the clipboard write we made, so the delayed restore below can tell
+    /// whether the user copied something else in the meantime.
+    private static let sessionType = NSPasteboard.PasteboardType("com.vela.app.paste-session")
+
     private static func pasteViaClipboard(_ text: String) {
         let pasteboard = NSPasteboard.general
         let saved = pasteboard.pasteboardItems?.compactMap { item -> (NSPasteboard.PasteboardType, Data)? in
@@ -106,18 +110,48 @@ enum TextInjector {
             return (type, data)
         } ?? []
 
+        let sessionID = UUID().uuidString
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        pasteboard.setString(sessionID, forType: sessionType)
+        let changeCount = pasteboard.changeCount
 
-        postCmdV()
+        postPaste()
 
-        // Restore the user's previous clipboard after the paste lands.
+        // Restore the user's previous clipboard after the paste lands — but only
+        // if nothing else has touched the clipboard since (e.g. the user copied
+        // something new during the restore delay); clobbering that would be worse
+        // than leaving our own text on the clipboard a little longer.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            guard pasteboard.changeCount == changeCount,
+                  pasteboard.string(forType: sessionType) == sessionID
+            else { return }
             pasteboard.clearContents()
             for (type, data) in saved {
                 pasteboard.setData(data, forType: type)
             }
         }
+    }
+
+    /// Tries the System Events route first — more reliable than a synthetic key
+    /// event in some Electron/web-based apps — falling back to CGEvent if
+    /// Automation permission hasn't been granted (or the app rejects it).
+    private static func postPaste() {
+        if pasteViaAppleScript() { return }
+        log.info("AppleScript paste unavailable — falling back to synthetic key events")
+        postCmdV()
+    }
+
+    private static func pasteViaAppleScript() -> Bool {
+        let source = "tell application \"System Events\" to keystroke \"v\" using command down"
+        guard let script = NSAppleScript(source: source) else { return false }
+        var error: NSDictionary?
+        script.executeAndReturnError(&error)
+        if let error {
+            log.info("AppleScript paste failed: \(error)")
+            return false
+        }
+        return true
     }
 
     private static func postCmdV() {

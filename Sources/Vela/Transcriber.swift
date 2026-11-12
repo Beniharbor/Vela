@@ -4,12 +4,18 @@ import os
 
 /// WhisperKit wrapper with on-demand load and idle auto-unload (G3: light on RAM).
 /// Shared between dictation and voice-note import so the model is only ever
-/// resident once; the actor serializes concurrent transcriptions.
+/// resident once. Concurrent callers share one in-flight load (actor methods
+/// are reentrant across `await`, so without that a preload and a transcribe
+/// could each load a copy). Transcriptions themselves are not serialized: a
+/// dictation during a voice-note import runs alongside it on the same model.
 actor Transcriber {
     static let shared = Transcriber()
 
     private var whisperKit: WhisperKit?
     private var loadedModelName: String?
+    /// The load in flight, if any — joined by every caller wanting the same model.
+    private var loadTask: Task<WhisperKit, Error>?
+    private var loadingModelName: String?
     private var unloadTask: Task<Void, Never>?
     private let log = Logger(subsystem: "com.vela.app", category: "stt")
 
@@ -20,6 +26,9 @@ actor Transcriber {
         let text: String
         /// ISO code of the (detected or forced) language, e.g. "en".
         let language: String
+        /// Raw WhisperKit results — carry word timings when requested, used to
+        /// line words up with speakers in Voice Notes.
+        var results: [TranscriptionResult] = []
     }
 
     /// Warms the model while the user is still speaking so transcription starts the
@@ -42,9 +51,12 @@ actor Transcriber {
         samples: [Float],
         glossaryTerms: [String],
         languageOverride: String? = nil,
+        wordTimestamps: Bool = false,
         onProgress: @escaping ProgressHandler
     ) async throws -> Output {
         unloadTask?.cancel()
+        // Re-arm the idle unload however this ends — success or throw (G3).
+        defer { scheduleUnload() }
         let pipe = try await loadIfNeeded(onProgress: onProgress)
 
         var options = DecodingOptions()
@@ -58,6 +70,7 @@ actor Transcriber {
             options.language = language
         }
         options.task = .transcribe
+        options.wordTimestamps = wordTimestamps
         // F4: bias recognition toward the user's glossary via the prompt.
         if !glossaryTerms.isEmpty, let tokenizer = pipe.tokenizer {
             let prompt = "Glossary: " + glossaryTerms.joined(separator: ", ") + "."
@@ -91,9 +104,8 @@ actor Transcriber {
             text = Self.joinedText(results)
         }
 
-        scheduleUnload()
         let detected = results.first?.language ?? (language == "auto" ? "en" : language)
-        return Output(text: Self.stripTags(text), language: detected)
+        return Output(text: Self.stripTags(text), language: detected, results: results)
     }
 
     private func loadIfNeeded(onProgress: @escaping ProgressHandler) async throws -> WhisperKit {
@@ -101,8 +113,29 @@ actor Transcriber {
         if let whisperKit, loadedModelName == wanted {
             return whisperKit
         }
+        if let loadTask, loadingModelName == wanted {
+            return try await loadTask.value
+        }
         whisperKit = nil // release any old model before loading a new one
+        loadedModelName = nil
 
+        let task = Task { try await Self.load(wanted, onProgress: onProgress) }
+        loadTask = task
+        loadingModelName = wanted
+        defer {
+            if loadingModelName == wanted {
+                loadTask = nil
+                loadingModelName = nil
+            }
+        }
+        let pipe = try await task.value
+        whisperKit = pipe
+        loadedModelName = wanted
+        return pipe
+    }
+
+    private static func load(_ wanted: String, onProgress: @escaping ProgressHandler) async throws -> WhisperKit {
+        let log = Logger(subsystem: "com.vela.app", category: "stt")
         // Use the on-disk copy when present — no network involved (G1: works offline).
         // Only hit Hugging Face when the model has never been downloaded.
         let folder: URL
@@ -121,8 +154,6 @@ actor Transcriber {
         let config = WhisperKitConfig(model: wanted, modelFolder: folder.path)
         let pipe = try await WhisperKit(config)
         log.info("Model loaded in \(Date().timeIntervalSince(start), format: .fixed(precision: 2))s")
-        whisperKit = pipe
-        loadedModelName = wanted
         return pipe
     }
 

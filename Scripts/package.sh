@@ -10,6 +10,18 @@ if [ "$CONFIG" = "install" ]; then CONFIG="release"; INSTALL="install"; fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Command Line Tools ships the macOS 27 SDK, where SwiftUI's @State is a macro
+# whose plugin (SwiftUIMacros) only comes with full Xcode — so every SwiftUI
+# file fails to compile. Pin the newest pre-27 SDK when building with CLT.
+# An explicit SDKROOT always wins.
+if [ -z "${SDKROOT:-}" ] && [[ "$(xcode-select -p)" == *CommandLineTools* ]]; then
+  OLD_SDK="$(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX2[0-6].*.sdk 2>/dev/null | sort -V | tail -1 || true)"
+  if [ -n "$OLD_SDK" ]; then
+    export SDKROOT="$OLD_SDK"
+    echo "==> Using SDK $SDKROOT (CLT lacks SwiftUI macro plugins for macOS 27)"
+  fi
+fi
+
 echo "==> swift build -c $CONFIG"
 swift build -c "$CONFIG"
 

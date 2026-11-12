@@ -16,6 +16,8 @@ let package = Package(
             dependencies: [
                 "KeyboardShortcuts",
                 .product(name: "WhisperKit", package: "WhisperKit"),
+                // Speaker diarization for Voice Notes conversations (same package).
+                .product(name: "SpeakerKit", package: "WhisperKit"),
             ],
             path: "Sources/Vela"
         )

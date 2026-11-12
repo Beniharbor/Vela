@@ -7,9 +7,15 @@ import SwiftUI
 final class RecordingHUD {
     private var panel: NSPanel?
 
+    /// Bumped by every show() so a fade-out started earlier can tell it's stale.
+    private var showGeneration = 0
+
     func show() {
         let panel = panel ?? makePanel()
         self.panel = panel
+        showGeneration += 1
+        // A fade from the previous take may be mid-flight — snap back to opaque.
+        panel.alphaValue = 1
         position(panel)
         panel.orderFrontRegardless()
     }
@@ -20,10 +26,13 @@ final class RecordingHUD {
             panel.orderOut(nil)
             return
         }
+        let generation = showGeneration
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.35
             panel.animator().alphaValue = 0
-        } completionHandler: {
+        } completionHandler: { [weak self] in
+            // A new take started during the fade (show() ran) — leave it visible.
+            guard let self, self.showGeneration == generation else { return }
             panel.orderOut(nil)
             panel.alphaValue = 1
         }

@@ -206,7 +206,7 @@ private struct VocabularySettings: View {
     var body: some View {
         Form {
             Section("Custom vocabulary") {
-                Text("One term per line — names, jargon, acronyms (e.g. Vercel, Supabase, Moonbase). Used to bias recognition and correct near-misses.")
+                Text("One term per line — names, jargon, acronyms (e.g. Vercel, Supabase, Moonbase). Used to bias recognition and correct near-misses. To always fix a word Whisper gets wrong, write it as a rule: Alphabet -> Alfavet")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 TextEditor(text: $glossary)

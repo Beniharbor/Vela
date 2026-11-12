@@ -76,6 +76,10 @@ final class DictationController: ObservableObject {
     private let recorder = AudioRecorder()
     private let transcriber = Transcriber.shared
     private let watchword = WatchwordListener()
+    /// Which engine the take in progress is using — decided at warmPipeline()
+    /// time from the selected mode, so a mid-recording style switch can't
+    /// change engines under a running session.
+    private var activeEngine: TranscriptionEngineKind = .whisperKit
     /// Set when the current take is ending because "watermelon" was heard, so
     /// stopAndProcess() knows to strip it back out of the transcript.
     private var stoppedByWatchword = false
@@ -135,7 +139,13 @@ final class DictationController: ObservableObject {
             Task { @MainActor in self?.pushLevel(level) }
         }
         recorder.onBuffer = { [weak self] buffer in
-            Task { @MainActor in self?.watchword.append(buffer) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.watchword.append(buffer)
+                if self.activeEngine == .appleSpeech, #available(macOS 26, *) {
+                    Task { await AppleSpeechTranscriber.shared.feed(buffer) }
+                }
+            }
         }
         watchword.onDetected = { [weak self] in self?.watchwordDetected() }
 
@@ -311,15 +321,51 @@ final class DictationController: ObservableObject {
         stoppedByWatchword = false
         state = .idle
         log.info("Recording cancelled via Esc — audio discarded")
-        // The preloaded Whisper model would otherwise stay resident forever (G3).
-        Task { await transcriber.scheduleUnload() }
+        releaseWarmEngine()
+    }
+
+    /// Undo warmPipeline() when a take ends without transcribing (Esc, too-short
+    /// tap, silence guard). preload() cancels the idle unload, so without this
+    /// the Whisper model would stay resident until the next dictation (G3); an
+    /// open Apple Speech session would never be closed.
+    private func releaseWarmEngine() {
+        if activeEngine == .appleSpeech, #available(macOS 26, *) {
+            Task { await AppleSpeechTranscriber.shared.cancel() }
+        } else {
+            Task { await transcriber.scheduleUnload() }
+        }
     }
 
     /// Latency: load the Whisper model (and the LLM for styles that use it) while
     /// the user is speaking, so processing starts the instant recording stops.
+    /// For Flow Apple, this instead opens the SpeechAnalyzer session so audio is
+    /// decoded live — by the time recording stops, most of the work is done.
     private func warmPipeline() {
-        Task { await transcriber.preload() }
-        if ModeStore.shared.selected.usesLLM {
+        let mode = ModeStore.shared.selected
+        if mode.engine == .appleSpeech, #available(macOS 26, *) {
+            activeEngine = .appleSpeech
+            Task {
+                do {
+                    try await AppleSpeechTranscriber.shared.start(
+                        languageOverride: nil,
+                        glossaryTerms: AppSettings.glossaryTerms
+                    ) { phase, fraction in
+                        Task { @MainActor in
+                            self.progressPhase = phase
+                            self.progressFraction = fraction
+                        }
+                    }
+                } catch {
+                    self.log.error("Apple Speech start failed, falling back to WhisperKit: \(error.localizedDescription, privacy: .public)")
+                    self.activeEngine = .whisperKit
+                    await self.transcriber.preload()
+                }
+            }
+        } else {
+            activeEngine = .whisperKit
+            Task { await transcriber.preload() }
+        }
+        if mode.usesLLM {
             Task { await OllamaCleanup.prewarm() }
         }
     }
@@ -349,6 +395,7 @@ final class DictationController: ObservableObject {
         // Ignore accidental taps shorter than ~0.3 s of audio.
         guard Double(samples.count) / AudioRecorder.targetSampleRate > 0.3 else {
             state = .idle
+            releaseWarmEngine()
             return
         }
 
@@ -361,6 +408,7 @@ final class DictationController: ObservableObject {
         )
         guard speech.containsSpeech else {
             state = .idle
+            releaseWarmEngine()
             lastError = "No speech detected — nothing inserted"
             log.info("Silence guard tripped (\(vadStats, privacy: .public)): \(samples.count) samples discarded")
             return
@@ -371,10 +419,15 @@ final class DictationController: ObservableObject {
             do {
                 let glossary = AppSettings.glossaryTerms
                 let sttStart = Date()
-                let stt = try await self.transcriber.transcribe(samples: samples, glossaryTerms: glossary) { phase, fraction in
-                    Task { @MainActor in
-                        self.progressPhase = phase
-                        self.progressFraction = fraction
+                let stt: Transcriber.Output
+                if self.activeEngine == .appleSpeech, #available(macOS 26, *) {
+                    stt = try await AppleSpeechTranscriber.shared.finish()
+                } else {
+                    stt = try await self.transcriber.transcribe(samples: samples, glossaryTerms: glossary) { phase, fraction in
+                        Task { @MainActor in
+                            self.progressPhase = phase
+                            self.progressFraction = fraction
+                        }
                     }
                 }
                 // F12: strip ums/uhs and awkward spacing for every style — Flow
@@ -397,14 +450,30 @@ final class DictationController: ObservableObject {
                 if mode.usesLLM {
                     self.state = .cleaning
                     do {
-                        final = try await OllamaCleanup.clean(raw, mode: mode, glossaryTerms: glossary, language: stt.language)
+                        let cleaned = try await OllamaCleanup.clean(raw, mode: mode, glossaryTerms: glossary, language: stt.language)
+                        if cleaned.isEmpty {
+                            // An empty reply would otherwise paste nothing and
+                            // still flash Done — keep what was actually said.
+                            self.log.error("\(mode.name, privacy: .public) styling returned nothing, using raw transcript")
+                        } else {
+                            final = cleaned
+                        }
                     } catch {
                         // Styling is best-effort: fall back to the raw transcript.
                         self.log.error("\(mode.name, privacy: .public) styling failed, using raw transcript: \(error.localizedDescription, privacy: .public)")
                     }
                 }
 
-                let outcome = TextInjector.inject(final)
+                var outcome = TextInjector.inject(final)
+                let pasteFailed = outcome == .failed
+                if pasteFailed {
+                    // Couldn't paste (Accessibility not granted): never drop the
+                    // text — leave it on the clipboard and say so instead of Done.
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(final, forType: .string)
+                    self.lastError = "Couldn't paste (check Accessibility permission) — transcript is on the clipboard"
+                    outcome = .copiedOnly
+                }
                 self.lastInsertWasCopyOnly = (outcome == .copiedOnly)
                 self.lastTranscript = final
                 self.lastLatency = Date().timeIntervalSince(released)
@@ -415,7 +484,7 @@ final class DictationController: ObservableObject {
                 )
                 self.log.info("End-to-end (release → inject): \(self.lastLatency ?? 0, format: .fixed(precision: 2))s")
                 self.state = .idle
-                self.flashDone()
+                if !pasteFailed { self.flashDone() }
             } catch {
                 self.lastError = error.localizedDescription
                 self.log.error("Pipeline failed: \(error.localizedDescription, privacy: .public)")

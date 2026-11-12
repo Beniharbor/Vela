@@ -332,9 +332,8 @@ private struct HistoryPane: View {
 
     private var rows: [TranscriptionRecord] {
         var rows = history.records
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        if !q.isEmpty {
-            rows = rows.filter { ($0.title + " " + $0.text).lowercased().contains(q) }
+        if !SearchMatch.terms(query).isEmpty {
+            rows = rows.filter { SearchMatch.matches($0.title + " " + $0.text, query: query) }
         }
         rows.sort { a, b in
             let comparison: Bool
@@ -363,22 +362,7 @@ private struct HistoryPane: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Color.velaFaint)
-            TextField("Search transcriptions", text: $query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .foregroundStyle(Color.velaInk)
-        }
-        .padding(EdgeInsets(top: 7, leading: 11, bottom: 7, trailing: 11))
-        .frame(width: 220)
-        .background(
-            RoundedRectangle(cornerRadius: 9)
-                .fill(Color.black.opacity(0.045))
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.velaBorder))
-        )
+        SearchField(placeholder: "Search transcriptions", text: $query)
     }
 
     private var tableHeader: some View {
@@ -432,6 +416,7 @@ private struct HistoryPane: View {
                         HistoryRow(
                             record: record,
                             dateLabel: Self.dateFormatter.string(from: record.date),
+                            query: query,
                             isSelected: record.id == selectedID
                         ) {
                             selectedID = record.id
@@ -468,6 +453,7 @@ private struct ColumnWidth: ViewModifier {
 private struct HistoryRow: View {
     let record: TranscriptionRecord
     let dateLabel: String
+    let query: String
     let isSelected: Bool
     let select: () -> Void
 
@@ -486,12 +472,12 @@ private struct HistoryRow: View {
                         .foregroundStyle(Color.velaBadgeText)
                         .padding(EdgeInsets(top: 2, leading: 5, bottom: 2, trailing: 5))
                         .background(RoundedRectangle(cornerRadius: 4).fill(Color.velaAccent.opacity(0.1)))
-                    Text(record.title)
+                    Text(SearchMatch.highlighted(record.title, query: query))
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(isSelected ? Color.velaAccentDeep : Color.velaInk)
                         .lineLimit(1)
                 }
-                Text(record.text)
+                Text(SearchMatch.highlighted(SearchMatch.snippet(record.text, query: query), query: query))
                     .font(.system(size: 12.5))
                     .foregroundStyle(Color.velaMuted)
                     .lineLimit(1)
@@ -668,6 +654,21 @@ private struct ModeRow: View {
             }
             field("DESCRIPTION") {
                 TextField("Short description shown in menus", text: $mode.detail)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                Text("ENGINE")
+                    .font(.system(size: 10.5, weight: .bold))
+                    .tracking(0.44)
+                    .foregroundStyle(Color.velaFaint)
+                Picker("", selection: $mode.engine) {
+                    Text("WhisperKit").tag(TranscriptionEngineKind.whisperKit)
+                    if #available(macOS 26, *) {
+                        Text("Apple (on-device)").tag(TranscriptionEngineKind.appleSpeech)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 260)
             }
             VStack(alignment: .leading, spacing: 5) {
                 Text("SYSTEM PROMPT")

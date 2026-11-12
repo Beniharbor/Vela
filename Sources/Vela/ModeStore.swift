@@ -1,5 +1,13 @@
 import Foundation
 
+/// Which speech-to-text backend a mode uses. Apple's on-device engine
+/// (macOS 26+) streams partial results while the user talks, so it has
+/// near-zero latency after release; WhisperKit decodes after recording stops.
+enum TranscriptionEngineKind: String, Codable {
+    case whisperKit
+    case appleSpeech
+}
+
 /// A user-editable dictation mode: name, menu description, and the LLM system
 /// prompt applied to the transcript. An empty prompt means no LLM pass (Flow).
 struct DictationMode: Codable, Identifiable, Equatable {
@@ -7,6 +15,7 @@ struct DictationMode: Codable, Identifiable, Equatable {
     var name: String
     var detail: String
     var systemPrompt: String
+    var engine: TranscriptionEngineKind = .whisperKit
 
     var usesLLM: Bool {
         !systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -22,6 +31,29 @@ struct DictationMode: Codable, Identifiable, Equatable {
         guard usesLLM else { return nil }
         return systemPrompt.replacingOccurrences(of: "{name}", with: AppSettings.userName)
     }
+
+    init(id: String, name: String, detail: String, systemPrompt: String, engine: TranscriptionEngineKind = .whisperKit) {
+        self.id = id
+        self.name = name
+        self.detail = detail
+        self.systemPrompt = systemPrompt
+        self.engine = engine
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, detail, systemPrompt, engine
+    }
+
+    /// Custom decode so modes persisted before `engine` existed still load
+    /// (defaulting to WhisperKit, the only engine at the time).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        detail = try container.decode(String.self, forKey: .detail)
+        systemPrompt = try container.decode(String.self, forKey: .systemPrompt)
+        engine = try container.decodeIfPresent(TranscriptionEngineKind.self, forKey: .engine) ?? .whisperKit
+    }
 }
 
 /// Owns the mode list: seeds the built-ins on first launch, persists every edit
@@ -35,12 +67,14 @@ final class ModeStore: ObservableObject {
     @Published var modes: [DictationMode] {
         didSet { persist() }
     }
+    /// False when the saved modes are unreadable and couldn't be backed up — see SafeStorage.
+    private var canSave = true
 
     private init() {
-        if let data = AppSettings.defaults.data(forKey: Self.storageKey),
-           let saved = try? JSONDecoder().decode([DictationMode].self, from: data),
-           !saved.isEmpty {
-            modes = saved
+        if let data = AppSettings.defaults.data(forKey: Self.storageKey) {
+            let loaded = SafeStorage.loadArray(DictationMode.self, from: data, label: "modes")
+            canSave = loaded.canSave
+            modes = loaded.items.isEmpty ? Self.builtIns : loaded.items
         } else {
             modes = Self.builtIns
         }
@@ -83,7 +117,7 @@ final class ModeStore: ObservableObject {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(modes) else { return }
+        guard canSave, let data = try? JSONEncoder().encode(modes) else { return }
         AppSettings.defaults.set(data, forKey: Self.storageKey)
     }
 
@@ -95,6 +129,13 @@ final class ModeStore: ObservableObject {
             name: "Flow",
             detail: "Very flowy ;)",
             systemPrompt: ""
+        ),
+        DictationMode(
+            id: "flow-apple",
+            name: "Flow Apple",
+            detail: "Apple's on-device engine — instant, no model download",
+            systemPrompt: "",
+            engine: .appleSpeech
         ),
         DictationMode(
             id: "polished",

@@ -28,6 +28,8 @@ final class HistoryStore: ObservableObject {
     static let shared = HistoryStore()
 
     @Published private(set) var records: [TranscriptionRecord] = []
+    /// False when history.json is unreadable and couldn't be backed up — see SafeStorage.
+    private var canSave = true
 
     private let fileURL: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -39,10 +41,9 @@ final class HistoryStore: ObservableObject {
     private init() {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        if let data = try? Data(contentsOf: fileURL),
-           let loaded = try? decoder.decode([TranscriptionRecord].self, from: data) {
-            records = loaded
-        }
+        let loaded = SafeStorage.loadArray(TranscriptionRecord.self, from: fileURL, decoder: decoder)
+        records = loaded.items
+        canSave = loaded.canSave
     }
 
     func add(text: String, duration: TimeInterval, language: String) {
@@ -74,9 +75,10 @@ final class HistoryStore: ObservableObject {
     }
 
     private func save() {
+        guard canSave else { return }
         let encoder = JSONEncoder()
+        // Must match the decoder in init.
         encoder.dateEncodingStrategy = .iso8601
-        // Decoding must match; set it once here so init and save can't drift.
         if let data = try? encoder.encode(records) {
             try? data.write(to: fileURL, options: .atomic)
         }
