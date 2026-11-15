@@ -35,6 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         AppSettings.registerDefaults()
         DictationController.shared.registerHotkey()
+        // Local transcription API for agents (OpenBot etc.) — see LocalAPIServer.
+        LocalAPIServer.shared.start()
         // Launching the app (Finder, Spotlight, login item) shows the dashboard
         // right away — otherwise the only feedback is the menu-bar icon.
         DashboardOpener.shared.openDashboard()
