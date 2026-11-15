@@ -140,7 +140,9 @@ final class VoiceNotesStore: ObservableObject {
                 // notes come out in whichever language each stretch was spoken.
                 let stt = try await Transcriber.shared.transcribe(
                     samples: samples,
-                    glossaryTerms: AppSettings.glossaryTerms,
+                    // No glossary prompt: on long audio it blanks out whole
+                    // windows. Vocabulary replacement rules still apply below.
+                    glossaryTerms: [],
                     languageOverride: "auto",
                     wordTimestamps: true
                 ) { phase, fraction in

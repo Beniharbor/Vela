@@ -40,7 +40,9 @@ enum SearchMatch {
                   let range = text.range(of: term, options: options, range: searchStart..<text.endIndex) {
                 if let attrRange = Range(range, in: result) {
                     result[attrRange].backgroundColor = Color.velaHighlight
-                    result[attrRange].foregroundColor = Color.velaInk
+                    result[attrRange].foregroundColor = Color.black
+                    // Bold without overriding the caller's font size.
+                    result[attrRange].inlinePresentationIntent = .stronglyEmphasized
                 }
                 searchStart = range.upperBound
             }
@@ -50,7 +52,7 @@ enum SearchMatch {
 }
 
 extension Color {
-    static let velaHighlight = Color(hex: 0xFFE58A)
+    static let velaHighlight = Color(hex: 0xFFD426)
 }
 
 struct SearchField: View {

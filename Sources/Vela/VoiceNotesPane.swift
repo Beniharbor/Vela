@@ -11,10 +11,13 @@ struct VoiceNotesPane: View {
     /// Row whose Copy button just fired — flashes a checkmark.
     @State private var copiedID: UUID?
     @State private var copiedAll = false
-    /// Conversation (who-said-what) vs. one plain block. Remembered across
-    /// launches; copy follows whichever view is showing.
-    @AppStorage("voiceNotes.conversationView") private var conversationView = true
+    /// Conversation (who-said-what) vs. one plain block; copy follows
+    /// whichever view is showing.
+    /// Every note opens in Conversation view; Plain text is a per-viewing switch.
+    @State private var conversationView = true
     @State private var query = ""
+    /// Turn (or plain block) just scrolled to — briefly tinted so the eye lands on it.
+    @State private var flashAnchor: String?
 
     private var isSearching: Bool { !SearchMatch.terms(query).isEmpty }
 
@@ -42,6 +45,7 @@ struct VoiceNotesPane: View {
                     copyAllButton
                 }
             }
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
                     // While searching, show just the results.
@@ -64,12 +68,18 @@ struct VoiceNotesPane: View {
                             note: note,
                             dateLabel: Self.dateFormatter.string(from: note.date),
                             query: query,
+                            flashAnchor: flashAnchor,
                             isExpanded: expandedID == note.id,
                             justCopied: copiedID == note.id,
                             conversationView: $conversationView,
                             toggle: {
                                 withAnimation(.easeInOut(duration: 0.15)) {
-                                    expandedID = expandedID == note.id ? nil : note.id
+                                    if expandedID == note.id {
+                                        expandedID = nil
+                                    } else {
+                                        expandedID = note.id
+                                        conversationView = true
+                                    }
                                 }
                             },
                             copy: { copy(note) },
@@ -80,6 +90,10 @@ struct VoiceNotesPane: View {
                 }
                 .padding(.bottom, 16)
             }
+            .onChange(of: query) { _, _ in scrollToFirstMatch(proxy) }
+            .onChange(of: expandedID) { _, _ in scrollToFirstMatch(proxy) }
+            .onChange(of: conversationView) { _, _ in scrollToFirstMatch(proxy) }
+            }
         }
         .dropDestination(for: URL.self) { urls, _ in
             store.importFiles(urls)
@@ -87,6 +101,38 @@ struct VoiceNotesPane: View {
         } isTargeted: { targeted in
             dropTargeted = targeted
         }
+    }
+
+    // MARK: Search
+
+    /// With a note open and a search active, bring the first hit into view —
+    /// in a long conversation it's usually far below the fold.
+    private func scrollToFirstMatch(_ proxy: ScrollViewProxy) {
+        guard isSearching, let id = expandedID,
+              let note = visibleNotes.first(where: { $0.id == id }),
+              let target = firstMatchAnchor(in: note)
+        else { return }
+        // Let the expand / view switch lay out before scrolling.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo(target, anchor: .center)
+            }
+            withAnimation(.easeIn(duration: 0.15)) { flashAnchor = target }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+                guard flashAnchor == target else { return }
+                withAnimation(.easeOut(duration: 0.6)) { flashAnchor = nil }
+            }
+        }
+    }
+
+    private func firstMatchAnchor(in note: VoiceNoteRecord) -> String? {
+        let terms = SearchMatch.terms(query)
+        let hits: (String) -> Bool = { text in terms.contains { SearchMatch.matches(text, query: $0) } }
+        if note.isConversation, conversationView, let turns = note.turns {
+            guard let index = turns.firstIndex(where: { hits($0.text) }) else { return nil }
+            return ConversationBody.anchor(note: note, turn: index)
+        }
+        return hits(note.text) ? "\(note.id)-plain" : nil
     }
 
     // MARK: Actions
@@ -236,6 +282,7 @@ private struct NoteRow: View {
     let note: VoiceNoteRecord
     let dateLabel: String
     let query: String
+    let flashAnchor: String?
     let isExpanded: Bool
     let justCopied: Bool
     @Binding var conversationView: Bool
@@ -266,7 +313,7 @@ private struct NoteRow: View {
                         .help("Conversation splits the note by speaker; Plain text is one block to copy anywhere")
                     }
                     if note.isConversation, conversationView, let turns = note.turns {
-                        ConversationBody(note: note, turns: turns, rename: rename)
+                        ConversationBody(note: note, turns: turns, query: query, flashAnchor: flashAnchor, rename: rename)
                     } else {
                         Text(SearchMatch.highlighted(note.text, query: query))
                             .font(.system(size: 13))
@@ -274,6 +321,13 @@ private struct NoteRow: View {
                             .lineSpacing(3)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.velaHighlight.opacity(flashAnchor == "\(note.id)-plain" ? 0.25 : 0))
+                            )
+                            .padding(-6)
+                            .id("\(note.id)-plain")
                     }
                 }
                 .padding(EdgeInsets(top: 0, leading: 20, bottom: 14, trailing: 20))
@@ -368,11 +422,15 @@ private func speakerColor(_ speaker: Int) -> Color {
 private struct ConversationBody: View {
     let note: VoiceNoteRecord
     let turns: [ConversationTurn]
+    let query: String
+    let flashAnchor: String?
     let rename: (Int, String) -> Void
+
+    static func anchor(note: VoiceNoteRecord, turn: Int) -> String { "\(note.id)-turn-\(turn)" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ForEach(Array(turns.enumerated()), id: \.offset) { _, turn in
+            ForEach(Array(turns.enumerated()), id: \.offset) { index, turn in
                 HStack(alignment: .top, spacing: 10) {
                     RoundedRectangle(cornerRadius: 1.5)
                         .fill(speakerColor(turn.speaker).opacity(0.55))
@@ -389,7 +447,7 @@ private struct ConversationBody: View {
                                 .monospacedDigit()
                                 .foregroundStyle(Color.velaFaint)
                         }
-                        Text(turn.text)
+                        Text(SearchMatch.highlighted(turn.text, query: query))
                             .font(.system(size: 13))
                             .foregroundStyle(Color.velaBody)
                             .lineSpacing(3)
@@ -398,6 +456,13 @@ private struct ConversationBody: View {
                     }
                 }
                 .fixedSize(horizontal: false, vertical: true)
+                .padding(6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.velaHighlight.opacity(flashAnchor == Self.anchor(note: note, turn: index) ? 0.25 : 0))
+                )
+                .padding(-6)
+                .id(Self.anchor(note: note, turn: index))
             }
         }
     }

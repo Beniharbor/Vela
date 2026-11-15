@@ -93,11 +93,13 @@ actor Transcriber {
         var results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
         var text = Self.joinedText(results)
 
-        // Glossary biasing is best-effort: some models (large-v3 turbo among them)
-        // decode to nothing when a prompt is prefilled. Retry bare rather than
-        // swallow the dictation.
-        if text.isEmpty, options.promptTokens != nil {
-            log.warning("Empty transcript with glossary prompt — retrying without it")
+        // Glossary biasing is best-effort: some models (large-v3 among them)
+        // decode to nothing when a prompt is prefilled — sometimes the whole
+        // take, sometimes only some 30 s windows (an 8-min note came back as
+        // 14 s of text with every other window blank). Retry bare rather than
+        // swallow speech.
+        if options.promptTokens != nil, text.isEmpty || Self.hasBlankWindow(results) {
+            log.warning("Blank window(s) with glossary prompt — retrying without it")
             options.promptTokens = nil
             options.usePrefillPrompt = false
             results = try await pipe.transcribe(audioArray: samples, decodeOptions: options)
@@ -191,6 +193,14 @@ actor Transcriber {
         whisperKit = nil
         loadedModelName = nil
         log.info("Whisper model unloaded (idle)")
+    }
+
+    /// True when a decoded window (≥ 10 s of audio) produced no words — the
+    /// signature of the prompt-induced blank decode, which spans the whole window.
+    private static func hasBlankWindow(_ results: [TranscriptionResult]) -> Bool {
+        results.flatMap(\.segments).contains { segment in
+            segment.end - segment.start >= 10 && stripTags(segment.text).isEmpty
+        }
     }
 
     private static func joinedText(_ results: [TranscriptionResult]) -> String {
