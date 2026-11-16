@@ -25,6 +25,10 @@ struct DictationMode: Codable, Identifiable, Equatable {
     /// selected mode falls back to it.
     var isFlow: Bool { id == "flow" }
 
+    /// An LLM mode can't run without Ollama installed — pickers show it dimmed
+    /// with a "Needs Ollama" note instead of letting it be selected.
+    var needsOllama: Bool { usesLLM && !OllamaCleanup.isAvailable }
+
     /// System prompt with runtime placeholders substituted:
     /// {name} → the sign-off name from Settings.
     var resolvedPrompt: String? {

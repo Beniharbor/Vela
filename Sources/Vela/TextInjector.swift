@@ -22,8 +22,11 @@ enum TextInjector {
         case failed
     }
 
+    /// `onNotLanded` fires (main thread, ~0.6 s later) when reading the focused
+    /// field back shows the paste changed nothing. The transcript is then left
+    /// on the clipboard instead of restoring the previous contents.
     @discardableResult
-    static func inject(_ text: String) -> Outcome {
+    static func inject(_ text: String, onNotLanded: (@MainActor () -> Void)? = nil) -> Outcome {
         guard !text.isEmpty else { return .failed }
         guard ensureAccessibility(prompt: true) else {
             log.error("Accessibility not granted; cannot inject")
@@ -38,7 +41,7 @@ enum TextInjector {
             log.info("No editable element focused — transcript left on clipboard")
             return .copiedOnly
         }
-        pasteViaClipboard(text)
+        pasteViaClipboard(text, onNotLanded: onNotLanded)
         return .pasted
     }
 
@@ -103,7 +106,53 @@ enum TextInjector {
     /// whether the user copied something else in the meantime.
     private static let sessionType = NSPasteboard.PasteboardType("com.vela.app.paste-session")
 
-    private static func pasteViaClipboard(_ text: String) {
+    /// What can be read of the focused field, for comparing before and after
+    /// a paste. Any attribute an app doesn't expose is nil.
+    private struct FocusSnapshot {
+        let element: AXUIElement
+        let characterCount: Int?
+        let caret: CFRange?
+    }
+
+    private static func focusSnapshot() -> FocusSnapshot? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+            let focusedRef, CFGetTypeID(focusedRef) == AXUIElementGetTypeID()
+        else { return nil }
+        let element = focusedRef as! AXUIElement
+
+        var countRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &countRef)
+        let count = (countRef as? NSNumber)?.intValue
+
+        var rangeRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef)
+        var caret: CFRange?
+        if let rangeRef, CFGetTypeID(rangeRef) == AXValueGetTypeID() {
+            var range = CFRange()
+            if AXValueGetValue(rangeRef as! AXValue, .cfRange, &range) { caret = range }
+        }
+        return FocusSnapshot(element: element, characterCount: count, caret: caret)
+    }
+
+    /// True only on positive evidence that nothing was inserted: the same
+    /// field is still focused, and both its length and its caret are readable
+    /// and unchanged. Anything unreadable (Electron apps, terminals, password
+    /// fields) counts as "can't tell" and is treated as a successful paste.
+    private static func pasteDidNotLand(before: FocusSnapshot?, after: FocusSnapshot?) -> Bool {
+        guard let before, let after, CFEqual(before.element, after.element),
+              let countBefore = before.characterCount, let countAfter = after.characterCount,
+              let caretBefore = before.caret, let caretAfter = after.caret
+        else { return false }
+        return countBefore == countAfter
+            && caretBefore.location == caretAfter.location
+            && caretBefore.length == caretAfter.length
+    }
+
+    private static func pasteViaClipboard(_ text: String, onNotLanded: (@MainActor () -> Void)?) {
+        let before = focusSnapshot()
         let pasteboard = NSPasteboard.general
         let saved = pasteboard.pasteboardItems?.compactMap { item -> (NSPasteboard.PasteboardType, Data)? in
             guard let type = item.types.first, let data = item.data(forType: type) else { return nil }
@@ -126,6 +175,19 @@ enum TextInjector {
             guard pasteboard.changeCount == changeCount,
                   pasteboard.string(forType: sessionType) == sessionID
             else { return }
+            let after = focusSnapshot()
+            if pasteDidNotLand(before: before, after: after) {
+                // Keep the transcript on the clipboard so it isn't lost.
+                log.info("Paste did not land — transcript left on clipboard")
+                MainActor.assumeIsolated { onNotLanded?() }
+                return
+            }
+            // Landed in a field we can read: watch it for a corrected word.
+            if let element = after?.element, let value = FocusContext.value(element) {
+                MainActor.assumeIsolated {
+                    VocabularyLearner.shared.track(element: element, pasted: text, value: value)
+                }
+            }
             pasteboard.clearContents()
             for (type, data) in saved {
                 pasteboard.setData(data, forType: type)
@@ -152,6 +214,44 @@ enum TextInjector {
             return false
         }
         return true
+    }
+
+    /// Return key — the "send it" voice command.
+    static func pressReturn() {
+        postKey(36, flags: [])
+    }
+
+    /// The current selection in the front app: Accessibility first, then a
+    /// synthetic ⌘C for apps that don't expose it (the clipboard is put back).
+    @MainActor
+    static func selectedText() async -> String? {
+        if let text = FocusContext.selectedText() { return text }
+        let pasteboard = NSPasteboard.general
+        let saved = pasteboard.pasteboardItems?.compactMap { item -> (NSPasteboard.PasteboardType, Data)? in
+            guard let type = item.types.first, let data = item.data(forType: type) else { return nil }
+            return (type, data)
+        } ?? []
+        let before = pasteboard.changeCount
+        postKey(8, flags: .maskCommand) // C
+        try? await Task.sleep(for: .milliseconds(180))
+        guard pasteboard.changeCount != before else { return nil }
+        let copied = pasteboard.string(forType: .string)
+        pasteboard.clearContents()
+        for (type, data) in saved { pasteboard.setData(data, forType: type) }
+        guard let copied, !copied.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return copied
+    }
+
+    private static func postKey(_ key: CGKeyCode, flags: CGEventFlags) {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        guard
+            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
+        else { return }
+        keyDown.flags = flags
+        keyUp.flags = flags
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
     }
 
     private static func postCmdV() {

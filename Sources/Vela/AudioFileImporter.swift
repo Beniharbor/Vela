@@ -38,6 +38,99 @@ enum AudioFileImporter {
         return try convert(buffer: buffer)
     }
 
+    /// Reads a file as 16 kHz mono in bounded pieces, so a 90-minute video is
+    /// never held in memory at its native rate all at once (48 kHz stereo
+    /// Float32 is ~1.4 GB per hour; one 10-minute piece is ~230 MB).
+    ///
+    /// Not thread-safe: call `next()` from one task at a time.
+    final class ChunkedReader: @unchecked Sendable {
+        let durationSeconds: Double
+        /// How far into the file the reader has advanced, in seconds.
+        private(set) var positionSeconds: Double = 0
+        var atEnd: Bool { positionSeconds >= durationSeconds }
+
+        private let chunkSeconds: Double
+        private let file: AVAudioFile?
+        private var framePosition: AVAudioFramePosition = 0
+        /// Ogg-Opus has no seekable AVAudioFile path — decoded once, then sliced.
+        private var decoded: [Float] = []
+        private var decodedOffset = 0
+
+        init(url: URL, chunkSeconds: Double = 600) throws {
+            self.chunkSeconds = chunkSeconds
+            if ["ogg", "opus", "oga"].contains(url.pathExtension.lowercased()) {
+                decoded = try AudioFileImporter.load(url: url)
+                file = nil
+                durationSeconds = Double(decoded.count) / AudioRecorder.targetSampleRate
+            } else {
+                let file = try AVAudioFile(forReading: url)
+                let rate = file.processingFormat.sampleRate
+                guard rate > 0, file.length > 0 else {
+                    throw VelaError.audio("\(url.lastPathComponent) contains no audio")
+                }
+                self.file = file
+                durationSeconds = Double(file.length) / rate
+            }
+        }
+
+        /// The next piece as 16 kHz mono samples, or nil once the file is
+        /// exhausted. The position advances even when a read throws, so a
+        /// damaged stretch can be skipped and the rest still transcribed.
+        func next() throws -> [Float]? {
+            guard let file else {
+                guard decodedOffset < decoded.count else { return nil }
+                let end = min(decodedOffset + Int(chunkSeconds * AudioRecorder.targetSampleRate), decoded.count)
+                defer {
+                    decodedOffset = end
+                    positionSeconds = Double(end) / AudioRecorder.targetSampleRate
+                }
+                return Array(decoded[decodedOffset..<end])
+            }
+
+            guard framePosition < file.length else { return nil }
+            let rate = file.processingFormat.sampleRate
+            let frames = AVAudioFrameCount(min(
+                AVAudioFramePosition(rate * chunkSeconds),
+                file.length - framePosition
+            ))
+            let start = framePosition
+            framePosition += AVAudioFramePosition(frames)
+            positionSeconds = Double(framePosition) / rate
+
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames) else {
+                throw VelaError.audio("Could not allocate audio buffer")
+            }
+            file.framePosition = start
+            try file.read(into: buffer, frameCount: frames)
+            guard buffer.frameLength > 0 else { return [] }
+            return try AudioFileImporter.convert(buffer: buffer)
+        }
+    }
+
+    /// Where to cut `samples` so the cut falls in the quietest 100 ms of the
+    /// last `searchSeconds` — between words rather than through one. The audio
+    /// after the cut is carried into the next piece, so nothing is lost and no
+    /// overlap has to be de-duplicated.
+    static func quietSplitIndex(in samples: [Float], searchSeconds: Double = 15) -> Int {
+        let rate = Int(AudioRecorder.targetSampleRate)
+        let frame = rate / 10
+        let window = Int(searchSeconds) * rate
+        guard samples.count > window * 2 else { return samples.count }
+        var bestStart = samples.count - frame
+        var bestEnergy = Float.greatestFiniteMagnitude
+        var start = samples.count - window
+        while start + frame <= samples.count {
+            var energy: Float = 0
+            for i in start..<(start + frame) { energy += samples[i] * samples[i] }
+            if energy < bestEnergy {
+                bestEnergy = energy
+                bestStart = start
+            }
+            start += frame
+        }
+        return bestStart + frame / 2
+    }
+
     /// Wraps raw interleaved samples in a PCM buffer and converts to 16 kHz mono.
     private static func convert(samples: [Float], channels: Int, sampleRate: Double) throws -> [Float] {
         guard !samples.isEmpty else { throw VelaError.audio("Decoded no audio") }

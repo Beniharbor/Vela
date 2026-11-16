@@ -40,6 +40,14 @@ for bundle in .build/"$CONFIG"/*.bundle; do
   [ -e "$bundle" ] && cp -R "$bundle" "$APP/Contents/Resources/"
 done
 
+# Dynamic frameworks from binary targets (llama.cpp); the binary finds them via
+# its @executable_path/../Frameworks rpath.
+for framework in .build/"$CONFIG"/*.framework; do
+  [ -e "$framework" ] || continue
+  mkdir -p "$APP/Contents/Frameworks"
+  ditto "$framework" "$APP/Contents/Frameworks/$(basename "$framework")"
+done
+
 # Stable identity keeps TCC permission grants across rebuilds (ad-hoc signatures
 # change every build, making macOS re-prompt for Mic/Accessibility each time).
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Vela Dev"; then

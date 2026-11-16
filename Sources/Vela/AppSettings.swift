@@ -5,6 +5,8 @@ extension KeyboardShortcuts.Name {
     /// Custom toggle shortcut (used when trigger mode is .customShortcut).
     /// Default ⌥Space — changeable in Settings.
     static let pushToTalk = Self("pushToTalk", default: .init(.space, modifiers: [.option]))
+    /// Select text, press this, say how to change it ("make this shorter").
+    static let rewriteSelection = Self("rewriteSelection", default: .init(.r, modifiers: [.control, .option]))
 }
 
 /// How dictation is triggered. Both modes are press-to-toggle:
@@ -30,6 +32,16 @@ enum AppSettings {
         /// Empty until the user first drags a tab — DashboardView fills in any
         /// pane missing from a stored order (new tabs added later, etc.).
         static let sidebarOrder = "sidebarOrder"
+        static let pauseMediaWhileDictating = "pauseMediaWhileDictating"
+        static let soundCues = "soundCues"
+        static let spokenPunctuation = "spokenPunctuation"
+        static let voiceSendCommand = "voiceSendCommand"
+        static let screenContext = "screenContext"
+        static let learnVocabulary = "learnVocabulary"
+        /// "misheard -> term" lines waiting for a yes/no in Settings → Vocabulary.
+        static let vocabularySuggestions = "vocabularySuggestions"
+        /// JSON [AppStyleRule].
+        static let appStyleRules = "appStyleRules"
     }
 
     static var defaults: UserDefaults { .standard }
@@ -55,6 +67,15 @@ enum AppSettings {
             // Sign-off name for Compose ("Best,\n<name>") — macOS first name by default.
             Keys.userName: NSFullUserName().split(separator: " ").first.map(String.init) ?? "",
             Keys.sidebarWidth: 210.0,
+            Keys.pauseMediaWhileDictating: true,
+            Keys.soundCues: true,
+            Keys.spokenPunctuation: true,
+            // Off until switched on: it presses Return in the focused app.
+            Keys.voiceSendCommand: false,
+            // Off until switched on: it hands on-screen text to the cleanup LLM.
+            Keys.screenContext: false,
+            Keys.learnVocabulary: true,
+            Keys.vocabularySuggestions: "",
         ])
     }
 
@@ -68,7 +89,40 @@ enum AppSettings {
     /// Whisper language code ("en", "es", …) or "auto" to detect per dictation.
     static var dictationLanguage: String { defaults.string(forKey: Keys.dictationLanguage) ?? "auto" }
     static var ollamaModel: String { defaults.string(forKey: Keys.ollamaModel) ?? "qwen2.5:3b" }
+    /// The selected speech model: a WhisperKit variant, or ParakeetTranscriber.modelID.
     static var whisperModel: String { defaults.string(forKey: Keys.whisperModel) ?? "large-v3-v20240930_626MB" }
+    static var usesParakeet: Bool { whisperModel == ParakeetTranscriber.modelID }
+    /// The Whisper variant to load when Whisper itself is needed — the selected
+    /// one, or the default when Parakeet is selected (word-timed voice notes).
+    static var whisperKitModel: String { usesParakeet ? "large-v3-v20240930_626MB" : whisperModel }
+    static var pauseMediaWhileDictating: Bool { defaults.bool(forKey: Keys.pauseMediaWhileDictating) }
+    static var soundCues: Bool { defaults.bool(forKey: Keys.soundCues) }
+    static var spokenPunctuation: Bool { defaults.bool(forKey: Keys.spokenPunctuation) }
+    static var voiceSendCommand: Bool { defaults.bool(forKey: Keys.voiceSendCommand) }
+    static var screenContext: Bool { defaults.bool(forKey: Keys.screenContext) }
+    static var learnVocabulary: Bool { defaults.bool(forKey: Keys.learnVocabulary) }
+
+    static var vocabularySuggestionLines: [String] {
+        (defaults.string(forKey: Keys.vocabularySuggestions) ?? "")
+            .split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    }
+
+    /// Queues "misheard -> term" for review unless it's already a rule or queued.
+    static func addVocabularySuggestion(misheard: String, term: String) {
+        let known = replacementRules.contains {
+            $0.from.caseInsensitiveCompare(misheard) == .orderedSame
+        }
+        let line = "\(misheard) -> \(term)"
+        var lines = vocabularySuggestionLines
+        guard !known, !lines.contains(where: { $0.caseInsensitiveCompare(line) == .orderedSame }) else { return }
+        lines.append(line)
+        defaults.set(lines.suffix(20).joined(separator: "\n"), forKey: Keys.vocabularySuggestions)
+    }
+
+    static func removeVocabularySuggestion(_ line: String) {
+        defaults.set(vocabularySuggestionLines.filter { $0 != line }.joined(separator: "\n"),
+                     forKey: Keys.vocabularySuggestions)
+    }
     static var modelIdleUnloadSeconds: Double { defaults.double(forKey: Keys.modelIdleUnloadSeconds) }
     /// Name used in Compose's default email sign-off.
     static var userName: String {

@@ -22,7 +22,8 @@ import urllib.error
 import urllib.request
 
 VELA = "http://127.0.0.1:47821"
-TIMEOUT_SECONDS = 1800  # long videos can take several minutes
+TIMEOUT_SECONDS = 3600  # overall budget for one video, however long
+POLL_SECONDS = 3
 
 
 def _http(method: str, path: str, body: dict | None = None, timeout: float = 5) -> dict:
@@ -61,7 +62,20 @@ def _ensure_vela() -> None:
 
 def transcribe_sync(url: str, language: str = "auto") -> str:
     _ensure_vela()
-    result = _http("POST", "/transcribe", {"url": url, "language": language}, timeout=TIMEOUT_SECONDS)
+    # Async job + polling: no single HTTP request has to stay open for the
+    # whole transcription, so a 90-minute video can't die on a timeout.
+    result = _http("POST", "/transcribe", {"url": url, "language": language, "async": True}, timeout=60)
+    job_id = result.get("jobId")
+    if job_id:
+        deadline = time.time() + TIMEOUT_SECONDS
+        while True:
+            result = _http("GET", f"/transcribe/{job_id}", timeout=30)
+            if result.get("status") not in ("queued", "running"):
+                break
+            if time.time() > deadline:
+                raise RuntimeError("Timed out waiting for Vela to finish the transcript.")
+            time.sleep(POLL_SECONDS)
+    # (An older Vela without async support answers the POST with the result itself.)
     if "error" in result:
         raise RuntimeError(result["error"])
     header = []
@@ -70,6 +84,8 @@ def transcribe_sync(url: str, language: str = "auto") -> str:
     header.append(f"Language: {result.get('language', '?')} · Duration: {result.get('durationSeconds', '?')}s")
     if result.get("note"):
         header.append(f"Note: {result['note']}")
+    for warning in result.get("warnings") or []:
+        header.append(f"Warning: {warning}")
     return "\n".join(header) + "\n\nTranscript:\n" + (result.get("text") or "")
 
 

@@ -33,12 +33,13 @@ extension Color {
 // MARK: - Dashboard window
 
 enum DashboardPane: String, CaseIterable {
-    case history, voiceNotes, languages, modes, features, settings
+    case history, voiceNotes, agentTranscripts, languages, modes, features, settings
 
     var label: String {
         switch self {
         case .history: return "History"
         case .voiceNotes: return "Voice Notes"
+        case .agentTranscripts: return "Agent Transcripts"
         case .languages: return "Languages"
         case .modes: return "Modes"
         case .features: return "Features"
@@ -50,6 +51,7 @@ enum DashboardPane: String, CaseIterable {
         switch self {
         case .history: return "clock.arrow.circlepath"
         case .voiceNotes: return "waveform.badge.plus"
+        case .agentTranscripts: return "play.rectangle.on.rectangle"
         case .languages: return "globe"
         case .modes: return "slider.vertical.3"
         case .features: return "sparkles"
@@ -100,6 +102,7 @@ struct DashboardView: View {
             switch pane {
             case .history: HistoryPane(history: history)
             case .voiceNotes: VoiceNotesPane()
+            case .agentTranscripts: AgentTranscriptsPane()
             case .languages: LanguagesPane()
             case .modes: ModesPane()
             case .features: FeaturesPane()
@@ -624,7 +627,15 @@ private struct ModeRow: View {
                     .foregroundStyle(Color.velaMuted)
             }
             Spacer()
-            if !mode.usesLLM {
+            if mode.needsOllama {
+                Text("NEEDS OLLAMA")
+                    .font(.system(size: 9, weight: .bold))
+                    .tracking(0.36)
+                    .foregroundStyle(Color.velaMuted)
+                    .padding(EdgeInsets(top: 2, leading: 5, bottom: 2, trailing: 5))
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.06)))
+                    .help("This mode rewrites with a local LLM. Install Ollama (brew install ollama) to use it.")
+            } else if !mode.usesLLM {
                 Text("NO AI")
                     .font(.system(size: 9, weight: .bold))
                     .tracking(0.36)
@@ -643,8 +654,9 @@ private struct ModeRow: View {
             .help(isExpanded ? "Collapse" : "Edit this mode")
         }
         .padding(EdgeInsets(top: 12, leading: 20, bottom: 12, trailing: 20))
+        .opacity(mode.needsOllama ? 0.45 : 1)
         .contentShape(Rectangle())
-        .onTapGesture(perform: select)
+        .onTapGesture { if !mode.needsOllama { select() } }
     }
 
     private var editor: some View {

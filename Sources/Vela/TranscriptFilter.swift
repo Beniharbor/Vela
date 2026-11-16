@@ -42,6 +42,62 @@ enum TranscriptFilter {
         return s
     }
 
+    /// Dictation-only: turns spoken layout and punctuation commands into the
+    /// real thing ("new line", "new paragraph", "comma", "question mark",
+    /// "exclamation mark"; Spanish "nueva línea", "nuevo párrafo", "punto y
+    /// aparte"). Deliberately leaves out words that are common in ordinary
+    /// speech ("period", "colon", Spanish "coma") — Whisper already ends
+    /// sentences on its own. Never applied to video / voice-note transcripts,
+    /// where these are just words someone said.
+    static func applyingSpokenCommands(_ text: String) -> String {
+        var s = text
+        // Commas Whisper put around the command go with it; a sentence end
+        // before it ("item. New line.") is kept.
+        let rules: [(pattern: String, replacement: String)] = [
+            (#"(?i)[ \t,;]*\b(?:new|next) paragraph\b[ \t,.;:!?]*"#, "\n\n"),
+            (#"(?i)[ \t,;]*\b(?:nuevo párrafo|nuevo parrafo|punto y aparte)\b[ \t,.;:!?]*"#, "\n\n"),
+            (#"(?i)[ \t,;]*\b(?:new line|newline|next line|nueva línea|nueva linea)\b[ \t,.;:!?]*"#, "\n"),
+            (#"(?i)[ \t,.?!]*\bquestion mark\b[ \t,.?!]*"#, "? "),
+            (#"(?i)[ \t,.?!]*\bexclamation (?:mark|point)\b[ \t,.?!]*"#, "! "),
+            (#"(?i)[ \t,]*\bcomma\b[ \t,]*"#, ", "),
+        ]
+        for rule in rules {
+            s = s.replacingOccurrences(
+                of: rule.pattern,
+                with: NSRegularExpression.escapedTemplate(for: rule.replacement),
+                options: .regularExpression
+            )
+        }
+        guard s != text else { return text }
+        // Tidy what the substitutions left: spaces hugging line breaks, a
+        // dangling ", " or "? " at the very end, a comma opening the text.
+        s = s.replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\n[ \t]+"#, with: "\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"[ \t]+$"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #",$"#, with: "", options: .regularExpression)
+        s = s.replacingOccurrences(of: #"^[ \t]*,[ \t]*"#, with: "", options: .regularExpression)
+        // A new line or a "? " starts a new sentence.
+        if let regex = try? NSRegularExpression(pattern: #"(?:^|\n|[?!] )(\p{Ll})"#) {
+            let matches = regex.matches(in: s, range: NSRange(s.startIndex..., in: s))
+            for match in matches.reversed() {
+                guard let range = Range(match.range(at: 1), in: s) else { continue }
+                s.replaceSubrange(range, with: s[range].uppercased())
+            }
+        }
+        return s
+    }
+
+    /// "Send it" spoken as its own closing sentence means: paste, then press
+    /// Return. Only matches at the very end and only after a sentence break,
+    /// so "tell me when you send it" is left alone.
+    static func extractingSendCommand(_ text: String) -> (text: String, send: Bool) {
+        let pattern = #"(?i)(^|[.!?\n])\s*(?:send it|send message|envíalo|envialo|enviar mensaje)\s*[.!]*\s*$"#
+        guard text.range(of: pattern, options: .regularExpression) != nil else { return (text, false) }
+        let stripped = text.replacingOccurrences(of: pattern, with: "$1", options: .regularExpression)
+        return (stripped.trimmingCharacters(in: .whitespaces), true)
+    }
+
     /// Strips a voice stop-word (e.g. "watermelon") said to end dictation early,
     /// along with any trailing punctuation it picked up in the transcript. Only
     /// call this for takes actually ended by the stop-word — applying it to every

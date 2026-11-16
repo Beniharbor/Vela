@@ -17,10 +17,24 @@ final class WatchwordListener {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var fired = false
+    /// Locales to try, in order — the first with on-device support is used.
+    private let locales: [String]
+    /// False for a preview-only listener in another language.
+    private let detectsWord: Bool
+
+    init(locales: [String] = ["en-US"], detectsWord: Bool = true) {
+        self.locales = locales
+        self.detectsWord = detectsWord
+    }
     private let log = Logger(subsystem: "com.vela.app", category: "watchword")
 
     /// Fired once per take, hopped to the main actor, the moment "watermelon" is heard.
     var onDetected: (() -> Void)?
+
+    /// Live preview: the running partial transcript of the take, hopped to the
+    /// main actor on every update. Rough (en-US only, no cleanup) — the pasted
+    /// text still comes from the real engine after recording stops.
+    var onPartial: ((String) -> Void)?
 
     static func requestAuthorization() async -> Bool {
         await withCheckedContinuation { continuation in
@@ -31,15 +45,18 @@ final class WatchwordListener {
     }
 
     /// Call once recording has actually started (mirrors AudioRecorder.start()).
-    func start() {
+    @discardableResult
+    func start() -> Bool {
         fired = false
-        let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        let recognizer = locales.lazy
+            .compactMap { SFSpeechRecognizer(locale: Locale(identifier: $0)) }
+            .first { $0.isAvailable && $0.supportsOnDeviceRecognition }
         self.recognizer = recognizer
-        guard let recognizer, recognizer.isAvailable else {
-            self.recognizer = nil
-            log.info("Speech recognizer unavailable — watermelon stop-word disabled for this take")
-            return
+        guard let recognizer else {
+            log.info("Speech recognizer unavailable for \(self.locales.joined(separator: ", "), privacy: .public)")
+            return false
         }
+        let detectsWord = self.detectsWord
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
@@ -49,14 +66,19 @@ final class WatchwordListener {
                 self?.log.error("Watchword recognition error: \(error.localizedDescription, privacy: .public)")
             }
             guard let result else { return }
-            let heard = result.bestTranscription.formattedString.lowercased()
-            guard heard.contains(Self.word) else { return }
+            let partial = result.bestTranscription.formattedString
+            let heard = partial.lowercased()
+            guard detectsWord, heard.contains(Self.word) else {
+                Task { @MainActor [weak self] in self?.onPartial?(partial) }
+                return
+            }
             Task { @MainActor [weak self] in
                 guard let self, !self.fired else { return }
                 self.fired = true
                 self.onDetected?()
             }
         }
+        return true
     }
 
     /// Feed a raw mic buffer — called on the audio thread, same as AudioRecorder.append.

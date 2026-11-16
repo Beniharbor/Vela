@@ -34,11 +34,15 @@ final class DictationController: ObservableObject {
                 recordingStarted = Date()
                 isPaused = false
                 pausedAt = nil
+                livePreview = ""
                 hud.show()
+                MediaPauser.shared.recordingStarted()
             case .transcribing, .cleaning:
+                livePreview = ""
                 // Keep the HUD up through the pipeline so the loading bar is visible.
                 hud.show()
             case .idle:
+                livePreview = ""
                 if oldValue == .recording {
                     recordingStarted = nil
                     isPaused = false
@@ -46,6 +50,10 @@ final class DictationController: ObservableObject {
                 }
                 // flashDone() re-shows the HUD right after, if applicable.
                 hud.hide()
+                MediaPauser.shared.pipelineFinished()
+                takeMode = nil
+                takeContext = nil
+                rewriteSource = nil
             }
         }
     }
@@ -63,6 +71,9 @@ final class DictationController: ObservableObject {
     /// Rolling mic-level history for the recording HUD (newest at the end).
     @Published private(set) var micLevels: [Float] = Array(repeating: 0, count: DictationController.levelBarCount)
     private static let levelBarCount = 24
+    /// Rough live transcript of the take in progress, shown above the HUD pill.
+    /// Empty when not recording or before the first words are recognized.
+    @Published private(set) var livePreview = ""
     private let hud = RecordingHUD()
     @Published private(set) var lastLatency: TimeInterval?
     @Published private(set) var lastTranscript: String?
@@ -76,6 +87,29 @@ final class DictationController: ObservableObject {
     private let recorder = AudioRecorder()
     private let transcriber = Transcriber.shared
     private let watchword = WatchwordListener()
+    /// Preview-only recognizer used in place of the English one's partials when
+    /// the take is expected to be in Spanish (the stop-word stays English).
+    private let spanishPreview = WatchwordListener(locales: ["es-ES", "es-MX", "es-US"], detectsWord: false)
+    private var previewInSpanish = false
+    /// The style this take uses when it isn't the globally selected one: a
+    /// per-app rule, or the synthetic "Rewrite" mode. Shown in the HUD chip.
+    @Published private(set) var takeMode: DictationMode?
+    /// Text already in the target field, for the cleanup LLM (screen context).
+    private var takeContext: String?
+    /// The selected text a voice-rewrite take will transform.
+    private var rewriteSource: String?
+    private static let rewriteMode = DictationMode(
+        id: "__rewrite", name: "Rewrite", detail: "say how to change the selection",
+        systemPrompt: "rewrite"
+    )
+    private var effectiveMode: DictationMode { takeMode ?? ModeStore.shared.selected }
+    /// Which language the live preview should listen for: the dictation
+    /// language when it's fixed, otherwise whatever the last dictation was in.
+    private var previewLanguage: String {
+        let setting = AppSettings.dictationLanguage
+        if setting != "auto" { return setting }
+        return HistoryStore.shared.records.last?.language.lowercased() == "es" ? "es" : "en"
+    }
     /// Which engine the take in progress is using — decided at warmPipeline()
     /// time from the selected mode, so a mid-recording style switch can't
     /// change engines under a running session.
@@ -103,7 +137,7 @@ final class DictationController: ObservableObject {
         switch state {
         case .idle:
             if lastInsertWasCopyOnly {
-                return "Nothing was focused — transcript is on the clipboard"
+                return "Paste didn't land — transcript is on the clipboard (⌘V)"
             }
             return "Vela — press \(triggerName) to dictate"
         case .recording:
@@ -119,7 +153,7 @@ final class DictationController: ObservableObject {
                 return "\(progressPhase)…"
             }
             return "Transcribing…"
-        case .cleaning: return "Formatting (\(ModeStore.shared.selected.name))…"
+        case .cleaning: return "Formatting (\(effectiveMode.name))…"
         }
     }
 
@@ -142,12 +176,24 @@ final class DictationController: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.watchword.append(buffer)
+                if self.previewInSpanish { self.spanishPreview.append(buffer) }
                 if self.activeEngine == .appleSpeech, #available(macOS 26, *) {
                     Task { await AppleSpeechTranscriber.shared.feed(buffer) }
                 }
             }
         }
         watchword.onDetected = { [weak self] in self?.watchwordDetected() }
+        spanishPreview.onPartial = { [weak self] text in
+            guard let self, self.state == .recording, self.previewInSpanish else { return }
+            self.livePreview = text
+        }
+        KeyboardShortcuts.onKeyDown(for: .rewriteSelection) { [weak self] in
+            self?.startRewrite()
+        }
+        watchword.onPartial = { [weak self] text in
+            guard let self, self.state == .recording, !self.previewInSpanish else { return }
+            self.livePreview = text
+        }
 
         // Both triggers are press-to-toggle; the active one is checked at press time
         // so switching modes in Settings takes effect immediately.
@@ -196,6 +242,8 @@ final class DictationController: ObservableObject {
         guard currentID != lastKnownStyleID else { return }
         lastKnownStyleID = currentID
         let current = ModeStore.shared.selected
+        // An explicit pick overrides a per-app rule for the rest of the take.
+        if rewriteSource == nil { takeMode = nil }
         switch state {
         case .idle:
             // F10 is for the menu bar / HUD pickers: switching there means "dictate
@@ -243,13 +291,40 @@ final class DictationController: ObservableObject {
         }
     }
 
-    func startRecording() {
+    /// Voice rewrite: grab the selection, then record a spoken instruction
+    /// ("make this shorter", "translate to Spanish") that replaces it.
+    func startRewrite() {
+        guard state == .idle else { return }
+        Task {
+            guard OllamaCleanup.isAvailable else {
+                self.lastError = "Voice rewrite needs the built-in AI model (Settings → Style → Download)"
+                return
+            }
+            guard let selection = await TextInjector.selectedText() else {
+                self.lastError = "Select some text first, then press the rewrite shortcut"
+                return
+            }
+            guard self.state == .idle else { return }
+            self.startRecording(rewriting: selection)
+        }
+    }
+
+    func startRecording(rewriting selection: String? = nil) {
         guard state == .idle else { return }
         lastError = nil
         lastInsertWasCopyOnly = false
+        // A correction made since the last dictation is checked before this
+        // one replaces what is being watched.
+        VocabularyLearner.shared.check()
+        rewriteSource = selection
+        takeMode = selection != nil ? Self.rewriteMode : AppStyleRules.modeForFrontmostApp()
+        takeContext = (selection == nil && AppSettings.screenContext && effectiveMode.usesLLM)
+            ? FocusContext.textBeforeCaret() : nil
         Task {
             guard await AudioRecorder.requestMicPermission() else {
                 self.lastError = "Microphone permission denied (System Settings → Privacy)"
+                self.takeMode = nil
+                self.rewriteSource = nil
                 return
             }
             // Supplementary feature — a "no" here just means no voice stop-word
@@ -258,15 +333,21 @@ final class DictationController: ObservableObject {
             // User may have released the key while the permission dialog was up.
             guard self.state == .idle else { return }
             do {
+                // Cue first, so the engine isn't already recording its own beep
+                // through the speakers for the whole length of the sound.
+                SoundCue.start.play()
                 try self.recorder.start()
                 self.state = .recording
                 if watchwordAuthorized {
                     self.watchword.start()
+                    self.previewInSpanish = self.previewLanguage == "es" && self.spanishPreview.start()
                 }
                 self.scheduleMaxDurationStop()
                 self.warmPipeline()
             } catch {
                 self.lastError = error.localizedDescription
+                self.takeMode = nil
+                self.rewriteSource = nil
             }
         }
     }
@@ -318,6 +399,8 @@ final class DictationController: ObservableObject {
         maxDurationTask = nil
         _ = recorder.stop()
         watchword.stop()
+        spanishPreview.stop()
+        previewInSpanish = false
         stoppedByWatchword = false
         state = .idle
         log.info("Recording cancelled via Esc — audio discarded")
@@ -341,7 +424,7 @@ final class DictationController: ObservableObject {
     /// For Flow Apple, this instead opens the SpeechAnalyzer session so audio is
     /// decoded live — by the time recording stops, most of the work is done.
     private func warmPipeline() {
-        let mode = ModeStore.shared.selected
+        let mode = effectiveMode
         if mode.engine == .appleSpeech, #available(macOS 26, *) {
             activeEngine = .appleSpeech
             Task {
@@ -388,6 +471,12 @@ final class DictationController: ObservableObject {
         let released = Date()
         let samples = recorder.stop()
         watchword.stop()
+        spanishPreview.stop()
+        previewInSpanish = false
+        SoundCue.stop.play()
+        let mode = effectiveMode
+        let rewriteSource = self.rewriteSource
+        let context = takeContext
         state = .transcribing
         let wasStoppedByWatchword = stoppedByWatchword
         stoppedByWatchword = false
@@ -440,17 +529,39 @@ final class DictationController: ObservableObject {
                 self.progressFraction = nil
                 self.log.info("STT took \(Date().timeIntervalSince(sttStart), format: .fixed(precision: 2))s: \(raw, privacy: .public)")
 
-                guard !raw.isEmpty else {
-                    self.state = .idle
-                    return
+                var sendAfter = false
+                var final: String
+                if let rewriteSource {
+                    // The transcript is the instruction; the selection is the text.
+                    guard !raw.isEmpty else {
+                        self.state = .idle
+                        return
+                    }
+                    self.state = .cleaning
+                    final = try await OllamaCleanup.rewrite(rewriteSource, instruction: raw)
+                    guard !final.isEmpty else {
+                        throw VelaError.cleanup("Rewrite returned nothing — your text was left unchanged")
+                    }
+                } else {
+                    if AppSettings.spokenPunctuation {
+                        raw = TranscriptFilter.applyingSpokenCommands(raw)
+                    }
+                    if AppSettings.voiceSendCommand {
+                        (raw, sendAfter) = TranscriptFilter.extractingSendCommand(raw)
+                    }
+                    guard !raw.isEmpty else {
+                        // "Send it" on its own: send what is already typed.
+                        if sendAfter { TextInjector.pressReturn() }
+                        self.state = .idle
+                        return
+                    }
+                    final = raw
                 }
 
-                var final = raw
-                let mode = ModeStore.shared.selected
-                if mode.usesLLM {
+                if rewriteSource == nil, mode.usesLLM {
                     self.state = .cleaning
                     do {
-                        let cleaned = try await OllamaCleanup.clean(raw, mode: mode, glossaryTerms: glossary, language: stt.language)
+                        let cleaned = try await OllamaCleanup.clean(raw, mode: mode, glossaryTerms: glossary, language: stt.language, context: context)
                         if cleaned.isEmpty {
                             // An empty reply would otherwise paste nothing and
                             // still flash Done — keep what was actually said.
@@ -464,7 +575,13 @@ final class DictationController: ObservableObject {
                     }
                 }
 
-                var outcome = TextInjector.inject(final)
+                var outcome = TextInjector.inject(final) { [weak self] in
+                    // Read-back says the paste never landed: the transcript was
+                    // left on the clipboard, so flip Done → Copied and say why.
+                    guard let self else { return }
+                    self.lastInsertWasCopyOnly = true
+                    self.log.info("Paste verification: text did not land — left on clipboard")
+                }
                 let pasteFailed = outcome == .failed
                 if pasteFailed {
                     // Couldn't paste (Accessibility not granted): never drop the
@@ -473,6 +590,13 @@ final class DictationController: ObservableObject {
                     NSPasteboard.general.setString(final, forType: .string)
                     self.lastError = "Couldn't paste (check Accessibility permission) — transcript is on the clipboard"
                     outcome = .copiedOnly
+                }
+                if sendAfter, outcome == .pasted {
+                    // Give the paste a moment to land before pressing Return.
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(350))
+                        TextInjector.pressReturn()
+                    }
                 }
                 self.lastInsertWasCopyOnly = (outcome == .copiedOnly)
                 self.lastTranscript = final

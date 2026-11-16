@@ -35,6 +35,10 @@ actor Transcriber {
     /// instant recording stops. RAM is only held during the dictation — the idle
     /// unload is re-armed by transcribe(), or by scheduleUnload() on cancel (G3).
     func preload() async {
+        if AppSettings.usesParakeet {
+            await ParakeetTranscriber.shared.preload()
+            return
+        }
         unloadTask?.cancel()
         do {
             _ = try await loadIfNeeded { _, _ in }
@@ -52,8 +56,18 @@ actor Transcriber {
         glossaryTerms: [String],
         languageOverride: String? = nil,
         wordTimestamps: Bool = false,
+        vadChunking: Bool = false,
         onProgress: @escaping ProgressHandler
     ) async throws -> Output {
+        // Parakeet has no word timings in the form Voice Notes' speaker
+        // alignment needs, so word-timed requests stay on Whisper.
+        if AppSettings.usesParakeet, !wordTimestamps {
+            return try await ParakeetTranscriber.shared.transcribe(
+                samples: samples,
+                language: languageOverride ?? AppSettings.dictationLanguage,
+                onProgress: onProgress
+            )
+        }
         unloadTask?.cancel()
         // Re-arm the idle unload however this ends — success or throw (G3).
         defer { scheduleUnload() }
@@ -71,6 +85,12 @@ actor Transcriber {
         }
         options.task = .transcribe
         options.wordTimestamps = wordTimestamps
+        // Opt-in: cut at silences and decode the pieces concurrently, each
+        // without the previous one's context. Not the default — see the note
+        // on `vad` in LocalAPIServer.
+        if vadChunking {
+            options.chunkingStrategy = .vad
+        }
         // F4: bias recognition toward the user's glossary via the prompt.
         if !glossaryTerms.isEmpty, let tokenizer = pipe.tokenizer {
             let prompt = "Glossary: " + glossaryTerms.joined(separator: ", ") + "."
@@ -110,8 +130,23 @@ actor Transcriber {
         return Output(text: Self.stripTags(text), language: detected, results: results)
     }
 
+    /// Detects the spoken language from the first 30 s of `samples`. Lets a
+    /// long file be pinned to one language up front rather than re-detected
+    /// (possibly differently) for every piece. Falls back to "en" for
+    /// English-only models.
+    /// nil with Parakeet, which is multilingual without a language token —
+    /// the caller reads the language off the first transcript instead.
+    func detectLanguage(samples: [Float]) async -> String? {
+        if AppSettings.usesParakeet { return nil }
+        unloadTask?.cancel()
+        defer { scheduleUnload() }
+        guard let pipe = try? await loadIfNeeded(onProgress: { _, _ in }) else { return "en" }
+        let head = Array(samples.prefix(Int(AudioRecorder.targetSampleRate) * 30))
+        return (try? await pipe.detectLangauge(audioArray: head).language) ?? "en"
+    }
+
     private func loadIfNeeded(onProgress: @escaping ProgressHandler) async throws -> WhisperKit {
-        let wanted = AppSettings.whisperModel
+        let wanted = AppSettings.whisperKitModel
         if let whisperKit, loadedModelName == wanted {
             return whisperKit
         }
@@ -183,11 +218,17 @@ actor Transcriber {
         unloadTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(idle))
             guard !Task.isCancelled else { return }
-            await self?.unload()
+            await self?.unloadWhisper()
         }
     }
 
-    func unload() {
+    /// "Unload models now": drops whichever engines are resident.
+    func unload() async {
+        await ParakeetTranscriber.shared.unload()
+        unloadWhisper()
+    }
+
+    private func unloadWhisper() {
         unloadTask?.cancel()
         unloadTask = nil
         whisperKit = nil

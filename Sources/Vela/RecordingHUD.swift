@@ -39,7 +39,8 @@ final class RecordingHUD {
     }
 
     private func makePanel() -> NSPanel {
-        let size = NSSize(width: 300, height: 56)
+        // Taller than the pill: the live-preview bubble sits above it.
+        let size = NSSize(width: 380, height: 150)
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -80,13 +81,54 @@ struct WaveformHUD: View {
     @AppStorage(AppSettings.Keys.dictationStyle) private var styleRaw = "flow"
 
     private var mode: DictationMode {
-        modeStore.modes.first { $0.id == styleRaw } ?? modeStore.selected
+        // A per-app rule or a voice rewrite overrides the selected style for the take.
+        if let takeMode = controller.takeMode { return takeMode }
+        return modeStore.modes.first { $0.id == styleRaw } ?? modeStore.selected
     }
 
     @State private var hovering = false
     @State private var funWord = WaveformHUD.randomFunWord()
 
     var body: some View {
+        VStack(spacing: 6) {
+            Spacer(minLength: 0)
+            if controller.state == .recording, !controller.livePreview.isEmpty {
+                livePreviewBubble
+                    .transition(.opacity)
+            }
+            statusArea
+                .frame(height: 56)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.15), value: controller.livePreview.isEmpty)
+    }
+
+    /// Rough words-as-you-speak preview. Shows the tail of the take so the
+    /// newest words are always visible; the pasted text comes from the real
+    /// engine afterwards and may differ slightly.
+    private var livePreviewBubble: some View {
+        Text(controller.livePreview)
+            .font(.system(size: 13, weight: .regular))
+            .foregroundStyle(.white.opacity(0.9))
+            .lineLimit(3)
+            .truncationMode(.head)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .frame(width: 360)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(red: 0.05, green: 0.05, blue: 0.06).opacity(0.92))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.white.opacity(0.14), lineWidth: 1)
+            )
+            .allowsHitTesting(false)
+    }
+
+    private var statusArea: some View {
         Group {
             if controller.showingDone {
                 doneBubble
@@ -295,8 +337,11 @@ struct WaveformHUD: View {
                     if candidate.id == mode.id {
                         Image(systemName: "checkmark")
                     }
-                    Text("\(candidate.name) — \(candidate.detail)")
+                    Text(candidate.needsOllama
+                         ? "\(candidate.name) — Needs AI model"
+                         : "\(candidate.name) — \(candidate.detail)")
                 }
+                .disabled(candidate.needsOllama)
             }
         } label: {
             HStack(spacing: 4) {
