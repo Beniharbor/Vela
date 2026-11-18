@@ -79,6 +79,10 @@ extension View {
 	}
 }
 
+// Vela: disabled — `@State` is a macro in the current SDK and its plugin
+// (SwiftUIMacros) ships only with Xcode, not Command Line Tools. Vela doesn't
+// use globalKeyboardShortcut, so the modifier is compiled out.
+#if KEYBOARDSHORTCUTS_GLOBAL_MODIFIER
 @available(macOS 12.3, *)
 extension View {
 	/**
@@ -118,4 +122,5 @@ private struct GlobalKeyboardShortcutViewModifier: ViewModifier {
 			}
 	}
 }
+#endif // KEYBOARDSHORTCUTS_GLOBAL_MODIFIER
 #endif
