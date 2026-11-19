@@ -32,11 +32,11 @@ struct VoiceNoteRecord: Codable, Identifiable, Equatable {
     /// "Name: …" lines, one per turn, for pasting elsewhere.
     var conversationText: String {
         guard let turns, isConversation else { return text }
-        return turns.map { "\(speakerName($0.speaker)): \($0.text)" }.joined(separator: "\n\n")
+        return turns.map { "\(speakerName($0.speaker)): \(Paragraphs.format($0.text))" }.joined(separator: "\n\n")
     }
 
     func exportText(asConversation: Bool) -> String {
-        asConversation ? conversationText : text
+        asConversation ? conversationText : Paragraphs.format(text)
     }
 
     /// First few words of the transcript, used as the row title.
@@ -89,6 +89,21 @@ final class VoiceNotesStore: ObservableObject {
         let loaded = SafeStorage.loadArray(VoiceNoteRecord.self, from: fileURL, decoder: decoder)
         notes = loaded.items
         canSave = loaded.canSave
+
+        // Re-check notes saved before false-speaker filtering existed.
+        var fixed = 0
+        for index in notes.indices {
+            guard let turns = notes[index].turns else { continue }
+            let collapsed = SpeakerDiarizer.collapsingFalseSpeakers(turns)
+            if collapsed != turns {
+                notes[index].turns = collapsed
+                fixed += 1
+            }
+        }
+        if fixed > 0 {
+            log.info("Merged false speaker splits in \(fixed) note(s)")
+            save()
+        }
     }
 
     // MARK: Import pipeline

@@ -120,7 +120,7 @@ actor SpeakerDiarizer {
                 turns.append(ConversationTurn(speaker: speaker, start: TimeInterval(run.start), text: text))
             }
         }
-        return order.count >= 2 ? turns : nil
+        return order.count >= 2 ? collapsingFalseSpeakers(turns) : nil
     }
 }
 

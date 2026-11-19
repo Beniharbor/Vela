@@ -315,7 +315,7 @@ private struct NoteRow: View {
                     if note.isConversation, conversationView, let turns = note.turns {
                         ConversationBody(note: note, turns: turns, query: query, flashAnchor: flashAnchor, rename: rename)
                     } else {
-                        Text(SearchMatch.highlighted(note.text, query: query))
+                        Text(SearchMatch.highlighted(Paragraphs.format(note.text), query: query))
                             .font(.system(size: 13))
                             .foregroundStyle(Color.velaBody)
                             .lineSpacing(3)
@@ -447,7 +447,7 @@ private struct ConversationBody: View {
                                 .monospacedDigit()
                                 .foregroundStyle(Color.velaFaint)
                         }
-                        Text(SearchMatch.highlighted(turn.text, query: query))
+                        Text(SearchMatch.highlighted(Paragraphs.format(turn.text), query: query))
                             .font(.system(size: 13))
                             .foregroundStyle(Color.velaBody)
                             .lineSpacing(3)
