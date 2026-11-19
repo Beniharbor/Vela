@@ -13,6 +13,7 @@
   <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-black?logo=apple">
   <img alt="Swift 5.9" src="https://img.shields.io/badge/Swift-5.9-F05138?logo=swift&logoColor=white">
   <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-native-555">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue">
   <img alt="100% local" src="https://img.shields.io/badge/runs-100%25%20on--device-2ea44f">
 </p>
 
@@ -142,3 +143,7 @@ Vela makes network requests only to download models from Hugging Face, and, if y
 ## Acknowledgements
 
 Built on [WhisperKit](https://github.com/argmaxinc/WhisperKit) by Argmax, [FluidAudio](https://github.com/FluidInference/FluidAudio) by Fluid Inference, [llama.cpp](https://github.com/ggml-org/llama.cpp), and [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts) by Sindre Sorhus.
+
+## License
+
+[MIT](LICENSE)
