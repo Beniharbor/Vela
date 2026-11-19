@@ -42,6 +42,14 @@ enum AppSettings {
         static let vocabularySuggestions = "vocabularySuggestions"
         /// JSON [AppStyleRule].
         static let appStyleRules = "appStyleRules"
+        /// "parakeet" or "whisper" — engine used for imported voice notes.
+        static let voiceNotesEngine = "voiceNotesEngine"
+    }
+
+    /// Voice notes default to Parakeet: more accurate on everyday English and
+    /// Spanish speech, and no Whisper-style looping on long files.
+    static var voiceNotesUseParakeet: Bool {
+        (defaults.string(forKey: Keys.voiceNotesEngine) ?? "parakeet") == "parakeet"
     }
 
     static var defaults: UserDefaults { .standard }

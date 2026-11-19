@@ -29,6 +29,8 @@ actor Transcriber {
         /// Raw WhisperKit results — carry word timings when requested, used to
         /// line words up with speakers in Voice Notes.
         var results: [TranscriptionResult] = []
+        /// Parakeet's word timings — the same job as `results` for that engine.
+        var timedWords: [TimedWord] = []
     }
 
     /// Warms the model while the user is still speaking so transcription starts the

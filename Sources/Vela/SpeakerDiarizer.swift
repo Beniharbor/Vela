@@ -3,6 +3,13 @@ import SpeakerKit
 import WhisperKit
 import os
 
+/// A recognized word with its time span in seconds (engine-neutral).
+struct TimedWord: Sendable {
+    let text: String
+    let start: Float
+    let end: Float
+}
+
 /// One stretch of a conversation spoken by a single person.
 struct ConversationTurn: Codable, Equatable, Hashable {
     /// 0-based, numbered by who speaks first (0 = first voice heard).
@@ -27,6 +34,37 @@ actor SpeakerDiarizer {
         transcription: [TranscriptionResult],
         onProgress: @escaping @Sendable (Double?) -> Void
     ) async throws -> [ConversationTurn]? {
+        guard let diarization = try await diarize(samples: samples, onProgress: onProgress) else { return nil }
+        let words: [Word] = diarization.addSpeakerInfo(to: transcription, strategy: .subsegment)
+            .flatMap { $0 }
+            .flatMap(\.speakerWords)
+            .map { Word(text: $0.wordTiming.word, start: $0.wordTiming.start, speaker: $0.speaker.speakerId) }
+        return Self.buildTurns(from: words)
+    }
+
+    /// Same, for engines that hand back plain word timings (Parakeet): each
+    /// word goes to the speaker active at its midpoint.
+    func turns(
+        samples: [Float],
+        words timed: [TimedWord],
+        onProgress: @escaping @Sendable (Double?) -> Void
+    ) async throws -> [ConversationTurn]? {
+        guard !timed.isEmpty,
+              let diarization = try await diarize(samples: samples, onProgress: onProgress) else { return nil }
+        let segments = diarization.segments.sorted { $0.startTime < $1.startTime }
+        let words = timed.map { word -> Word in
+            let mid = (word.start + word.end) / 2
+            let speaker = segments.first { $0.startTime <= mid && mid <= $0.endTime }?.speaker.speakerId
+            return Word(text: " " + word.text, start: word.start, speaker: speaker)
+        }
+        return Self.buildTurns(from: words)
+    }
+
+    /// nil when only one voice was found.
+    private func diarize(
+        samples: [Float],
+        onProgress: @escaping @Sendable (Double?) -> Void
+    ) async throws -> DiarizationResult? {
         let kit = try await SpeakerKit(PyannoteConfig(verbose: false))
         defer { Task { await kit.unloadModels() } }
 
@@ -35,13 +73,7 @@ actor SpeakerDiarizer {
             onProgress(progress.fractionCompleted)
         }
         log.info("Diarized \(diarization.speakerCount) speaker(s) in \(Date().timeIntervalSince(start), format: .fixed(precision: 1))s")
-        guard diarization.speakerCount >= 2 else { return nil }
-
-        let words: [Word] = diarization.addSpeakerInfo(to: transcription, strategy: .subsegment)
-            .flatMap { $0 }
-            .flatMap(\.speakerWords)
-            .map { Word(text: $0.wordTiming.word, start: $0.wordTiming.start, speaker: $0.speaker.speakerId) }
-        return Self.buildTurns(from: words)
+        return diarization.speakerCount >= 2 ? diarization : nil
     }
 
     struct Word {

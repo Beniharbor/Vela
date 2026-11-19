@@ -66,7 +66,11 @@ actor ParakeetTranscriber {
         let hint = Language(rawValue: language)
         let result = try await manager.transcribe(audio, decoderState: &state, language: hint)
         let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return Transcriber.Output(text: text, language: hint?.rawValue ?? Self.detectLanguage(of: text))
+        var output = Transcriber.Output(text: text, language: hint?.rawValue ?? Self.detectLanguage(of: text))
+        output.timedWords = buildWordTimings(from: result.tokenTimings ?? []).map {
+            TimedWord(text: $0.word, start: Float($0.startTime), end: Float($0.endTime))
+        }
+        return output
     }
 
     /// Parakeet doesn't say which language it heard — read it off the text.

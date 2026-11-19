@@ -28,6 +28,8 @@ struct VoiceNotesPane: View {
         }
     }
 
+    @AppStorage(AppSettings.Keys.voiceNotesEngine) private var engine = "parakeet"
+
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "MMM d, h:mm a"
@@ -53,7 +55,9 @@ struct VoiceNotesPane: View {
                         VocabularyCard()
                             .padding(EdgeInsets(top: 16, leading: 20, bottom: 0, trailing: 20))
                         dropZone
-                            .padding(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
+                            .padding(EdgeInsets(top: 12, leading: 20, bottom: 6, trailing: 20))
+                        enginePicker
+                            .padding(EdgeInsets(top: 0, leading: 20, bottom: 8, trailing: 20))
                         ForEach(store.pending) { item in
                             PendingRow(item: item) { store.dismiss(item) }
                         }
@@ -185,6 +189,23 @@ struct VoiceNotesPane: View {
         .help(conversationView
               ? "Copy every transcript, oldest first, with speaker names"
               : "Copy every transcript, oldest first, as plain text")
+    }
+
+    private var enginePicker: some View {
+        HStack(spacing: 8) {
+            Spacer()
+            Text("Transcribe with")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.velaMuted)
+            Picker("", selection: $engine) {
+                Text("Parakeet").tag("parakeet")
+                Text("Whisper").tag("whisper")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
+        .help("Parakeet: more accurate on English & Spanish and much faster. Whisper: ~100 languages — use it for Arabic and others.")
     }
 
     private var dropZone: some View {

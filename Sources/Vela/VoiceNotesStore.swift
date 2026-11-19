@@ -153,18 +153,23 @@ final class VoiceNotesStore: ObservableObject {
                 // notes are often Spanglish, and forcing one language turns the
                 // other into gibberish. Detection is per ~30 s window, so mixed
                 // notes come out in whichever language each stretch was spoken.
-                let stt = try await Transcriber.shared.transcribe(
+                let progress: Transcriber.ProgressHandler = { phase, fraction in
+                    Task { @MainActor in
+                        self.update(job.id, phase: "\(phase)…", fraction: fraction)
+                    }
+                }
+                let useParakeet = AppSettings.voiceNotesUseParakeet
+                let stt = useParakeet
+                    ? try await ParakeetTranscriber.shared.transcribe(samples: samples, language: "auto", onProgress: progress)
+                    : try await Transcriber.shared.transcribe(
                     samples: samples,
                     // No glossary prompt: on long audio it blanks out whole
                     // windows. Vocabulary replacement rules still apply below.
                     glossaryTerms: [],
                     languageOverride: "auto",
-                    wordTimestamps: true
-                ) { phase, fraction in
-                    Task { @MainActor in
-                        self.update(job.id, phase: "\(phase)…", fraction: fraction)
-                    }
-                }
+                    wordTimestamps: true,
+                    onProgress: progress
+                )
                 let text = TranscriptFilter.clean(stt.text)
                 guard !text.isEmpty else {
                     throw VelaError.transcription("No speech recognized in this file")
@@ -175,14 +180,14 @@ final class VoiceNotesStore: ObservableObject {
                 self.update(job.id, phase: "Identifying speakers…", fraction: nil)
                 var turns: [ConversationTurn]?
                 do {
-                    turns = try await SpeakerDiarizer.shared.turns(
-                        samples: samples,
-                        transcription: stt.results
-                    ) { fraction in
+                    let speakerProgress: @Sendable (Double?) -> Void = { fraction in
                         Task { @MainActor in
                             self.update(job.id, phase: "Identifying speakers…", fraction: fraction)
                         }
                     }
+                    turns = useParakeet
+                        ? try await SpeakerDiarizer.shared.turns(samples: samples, words: stt.timedWords, onProgress: speakerProgress)
+                        : try await SpeakerDiarizer.shared.turns(samples: samples, transcription: stt.results, onProgress: speakerProgress)
                 } catch {
                     self.log.error("Speaker detection failed for \(job.url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
