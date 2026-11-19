@@ -61,12 +61,16 @@ actor Transcriber {
         vadChunking: Bool = false,
         onProgress: @escaping ProgressHandler
     ) async throws -> Output {
-        // Parakeet has no word timings in the form Voice Notes' speaker
-        // alignment needs, so word-timed requests stay on Whisper.
+        // Word-timed requests (Whisper-format timings) stay on Whisper; Voice
+        // Notes calls ParakeetTranscriber directly when it wants Parakeet.
         if AppSettings.usesParakeet, !wordTimestamps {
             return try await ParakeetTranscriber.shared.transcribe(
                 samples: samples,
                 language: languageOverride ?? AppSettings.dictationLanguage,
+                // Dictation and the link API get the same vocabulary boosting
+                // as Voice Notes. Unlike Whisper's prompt, it can't blank out
+                // long audio, so the API's empty glossaryTerms doesn't apply.
+                vocabulary: AppSettings.glossaryEntries,
                 onProgress: onProgress
             )
         }
