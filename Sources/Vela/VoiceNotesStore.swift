@@ -160,7 +160,9 @@ final class VoiceNotesStore: ObservableObject {
                 }
                 let useParakeet = AppSettings.voiceNotesUseParakeet
                 let stt = useParakeet
-                    ? try await ParakeetTranscriber.shared.transcribe(samples: samples, language: "auto", onProgress: progress)
+                    ? try await ParakeetTranscriber.shared.transcribe(
+                        samples: samples, language: "auto",
+                        vocabulary: AppSettings.glossaryEntries, onProgress: progress)
                     : try await Transcriber.shared.transcribe(
                     samples: samples,
                     // No glossary prompt: on long audio it blanks out whole

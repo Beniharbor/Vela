@@ -18,6 +18,8 @@ actor ParakeetTranscriber {
     static let modelID = "parakeet-v3"
 
     private var manager: AsrManager?
+    /// Vocabulary-boosting model, loaded on first use with a non-empty vocabulary.
+    private var ctcModels: CtcModels?
     private var loadTask: Task<AsrManager, Error>?
     private var unloadTask: Task<Void, Never>?
     private let log = Logger(subsystem: "com.vela.app", category: "stt-parakeet")
@@ -37,6 +39,7 @@ actor ParakeetTranscriber {
     func transcribe(
         samples: [Float],
         language: String,
+        vocabulary: [AppSettings.GlossaryEntry] = [],
         onProgress: @escaping Transcriber.ProgressHandler
     ) async throws -> Transcriber.Output {
         unloadTask?.cancel()
@@ -70,7 +73,73 @@ actor ParakeetTranscriber {
         output.timedWords = buildWordTimings(from: result.tokenTimings ?? []).map {
             TimedWord(text: $0.word, start: Float($0.startTime), end: Float($0.endTime))
         }
+
+        if !vocabulary.isEmpty, let timings = result.tokenTimings, !timings.isEmpty {
+            onProgress("Checking vocabulary", nil)
+            do {
+                if let boosted = try await boost(text: text, timings: timings, audio: audio, vocabulary: vocabulary),
+                   boosted.wasModified {
+                    output = Transcriber.Output(text: boosted.text, language: output.language,
+                                                timedWords: Self.applying(boosted.replacements, to: output.timedWords))
+                    log.info("Vocabulary fixed \(boosted.replacements.count) word(s)")
+                }
+            } catch {
+                log.error("Vocabulary boosting skipped: \(error.localizedDescription, privacy: .public)")
+            }
+        }
         return output
+    }
+
+    /// Re-checks the audio for the user's vocabulary with a small CTC model and
+    /// swaps in a term where the audio supports it better than the word Parakeet
+    /// chose — catches accent variants ("Ernaut", "Earnot") a plain
+    /// find-and-replace rule never would.
+    private func boost(
+        text: String,
+        timings: [TokenTiming],
+        audio: [Float],
+        vocabulary: [AppSettings.GlossaryEntry]
+    ) async throws -> VocabularyRescorer.RescoreOutput? {
+        if ctcModels == nil {
+            // First use downloads ~100 MB; later loads are local.
+            ctcModels = try await CtcModels.downloadAndLoad()
+        }
+        guard let ctcModels else { return nil }
+        let context = CustomVocabularyContext(terms: vocabulary.map {
+            CustomVocabularyTerm(text: $0.term, aliases: $0.misheard.isEmpty ? nil : $0.misheard)
+        })
+        // Floors on: most notes won't contain most terms, so the acoustic-only
+        // rescue must also look a bit like the word it replaces.
+        let session = try await VocabularyBoostingSession(
+            vocabulary: context,
+            ctcModels: ctcModels,
+            config: VocabularyRescorer.Config(
+                spotterRescueMinSimilarity: 0.30,
+                spotterRescueMultiWordMinSimilarity: 0.50
+            )
+        )
+        return await session.rescore(text: text, tokenTimings: timings, audioSamples: audio)
+    }
+
+    /// Mirrors single-word vocabulary fixes onto the timed words, so speaker
+    /// turns read the same as the plain transcript.
+    private static func applying(_ replacements: [VocabularyRescorer.RescoringResult], to words: [TimedWord]) -> [TimedWord] {
+        var map: [String: String] = [:]
+        for r in replacements where r.shouldReplace {
+            guard let to = r.replacementWord, !r.originalWord.contains(" ") else { continue }
+            map[normalize(r.originalWord)] = to
+        }
+        guard !map.isEmpty else { return words }
+        return words.map { word in
+            let key = normalize(word.text)
+            guard let to = map[key] else { return word }
+            let trailing = String(word.text.reversed().prefix { $0.isPunctuation }.reversed())
+            return TimedWord(text: to + trailing, start: word.start, end: word.end)
+        }
+    }
+
+    private static func normalize(_ s: String) -> String {
+        s.lowercased().trimmingCharacters(in: .punctuationCharacters)
     }
 
     /// Parakeet doesn't say which language it heard — read it off the text.
@@ -120,6 +189,7 @@ actor ParakeetTranscriber {
     func unload() async {
         unloadTask?.cancel()
         unloadTask = nil
+        ctcModels = nil
         guard let manager else { return }
         self.manager = nil
         await manager.cleanup()
